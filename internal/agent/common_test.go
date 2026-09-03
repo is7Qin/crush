@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ import (
 // fakeEnv is an environment for testing.
 type fakeEnv struct {
 	workingDir  string
+	conn        *sql.DB
 	sessions    session.Service
 	messages    message.Service
 	permissions permission.Service
@@ -87,6 +89,7 @@ func testEnv(t *testing.T) fakeEnv {
 
 	return fakeEnv{
 		workingDir,
+		conn,
 		sessions,
 		messages,
 		permissions,

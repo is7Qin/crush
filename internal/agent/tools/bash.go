@@ -206,6 +206,18 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			// Determine working directory
 			execWorkingDir := cmp.Or(params.WorkingDir, workingDir)
 
+			// A task-run child must not detach work past its lease:
+			// background jobs outlive the tool invocation, so the
+			// workspace write lease would be released while the
+			// command is still mutating. Explicit background is
+			// rejected and auto-background is disabled below; the
+			// child waits for its process to return.
+			_, inTaskRun := GetTaskRunContextFromContext(ctx)
+			if inTaskRun && params.RunInBackground {
+				return fantasy.NewTextErrorResponse(
+					"run_in_background is not available inside agent task runs; wait for the command to finish"), nil
+			}
+
 			isSafeReadOnly := false
 			cmdLower := strings.ToLower(params.Command)
 
@@ -317,7 +329,12 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 
 			autoBackgroundAfter := cmp.Or(params.AutoBackgroundAfter, DefaultAutoBackgroundAfter)
 			autoBackgroundThreshold := time.Duration(autoBackgroundAfter) * time.Second
-			timeout := time.After(autoBackgroundThreshold)
+			// Under a task-run fence the timeout case stays nil so the
+			// loop only ends on completion or context cancellation.
+			var timeout <-chan time.Time
+			if !inTaskRun {
+				timeout = time.After(autoBackgroundThreshold)
+			}
 
 			var stdout, stderr string
 			var done bool

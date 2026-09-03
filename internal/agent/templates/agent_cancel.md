@@ -1,0 +1,1 @@
+Cancel an agent task by task id.

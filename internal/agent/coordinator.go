@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
+	"github.com/charmbracelet/crush/internal/agent/task"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
@@ -56,14 +57,11 @@ import (
 
 // Coordinator errors.
 var (
-	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
-	errModelProviderNotConfigured      = errors.New("model provider not configured")
-	errLargeModelNotSelected           = errors.New("large model not selected")
-	errSmallModelNotSelected           = errors.New("small model not selected")
-	errLargeModelProviderNotConfigured = errors.New("large model provider not configured")
-	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
-	errLargeModelNotFound              = errors.New("large model not found in provider config")
-	errSmallModelNotFound              = errors.New("small model not found in provider config")
+	errCoderAgentNotConfigured    = errors.New("coder agent not configured")
+	errModelProviderNotConfigured = errors.New("model provider not configured")
+	errLargeModelNotSelected      = errors.New("large model not selected")
+	errSmallModelNotSelected      = errors.New("small model not selected")
+	errModelNotFound              = errors.New("model not found in provider config")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -137,6 +135,37 @@ type Coordinator interface {
 	GenerateTitle(ctx context.Context, sessionID, prompt string)
 }
 
+// TaskStarter is the narrow coordinator-facing view of the task.Manager
+// used to run call_agent delegations. It exists so the coordinator depends
+// only on the one operation it needs and the task package stays independent
+// of providers and Fantasy. The production implementation is
+// [*task.Manager]; tests substitute a fake.
+type TaskStarter interface {
+	Start(ctx context.Context, req task.StartRequest) (*task.Task, error)
+}
+
+// TaskController is the narrow coordinator-facing view of the task
+// manager's control plane, used to build the primary-only agent_* task
+// control tools. It is a separate optional interface so TaskStarter
+// stays minimal and the task package remains independent of Fantasy.
+// The production implementation is [*task.Manager], which authorizes
+// every operation against the trusted owner session; a TaskStarter
+// without the control plane simply gets no control tools.
+type TaskController interface {
+	Status(ctx context.Context, callerSessionID, taskID string) (*task.Task, error)
+	Output(ctx context.Context, callerSessionID, taskID string) (task.Result, bool, error)
+	List(ctx context.Context, callerSessionID, parentSessionID string) ([]*task.Task, error)
+	Cancel(ctx context.Context, callerSessionID, taskID string) error
+	AppendMessage(ctx context.Context, req task.MessageRequest) (task.MessageAccepted, error)
+}
+
+// The production manager satisfies both coordinator-facing views; the
+// assertion fails the build if the control plane ever drifts.
+var (
+	_ TaskStarter    = (*task.Manager)(nil)
+	_ TaskController = (*task.Manager)(nil)
+)
+
 type coordinator struct {
 	cfg         *config.ConfigStore
 	sessions    session.Service
@@ -149,6 +178,25 @@ type coordinator struct {
 	notify      pubsub.Publisher[notify.Notification]
 	runComplete pubsub.Publisher[notify.RunComplete]
 	interactive bool
+
+	// tasks runs call_agent delegations through the durable task core.
+	// When nil (legacy callers and unit tests that do not exercise
+	// delegation), agentTool falls back to the in-process runSubAgent path.
+	tasks TaskStarter
+	// taskQuestions is the task-correlated question transport handed to
+	// child runs. When nil (legacy wiring and tests that do not exercise
+	// child questions), children get no question tool, preserving the
+	// original sub-agent palette.
+	taskQuestions tools.TaskQuestionTransport
+	// newChildAgent, when set, replaces buildProfileAgent's construction.
+	// It is a test seam for driving the delegation path with a fake model;
+	// production wiring leaves it nil.
+	newChildAgent func(ctx context.Context, name, requestModel string) (SessionAgent, config.ResolvedProfile, error)
+	// newFetchChild, when set, replaces buildAgenticFetchAgent's
+	// construction. It is the test seam for driving the hidden
+	// agentic_fetch task routing with a fake child agent; production
+	// wiring leaves it nil.
+	newFetchChild func(ctx context.Context, tmpDir string, spec agenticFetchChildSpec) (SessionAgent, error)
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -177,6 +225,15 @@ type CoordinatorOptions struct {
 	RunComplete pubsub.Publisher[notify.RunComplete]
 	Skills      *skills.Manager
 	Interactive bool
+	// Tasks runs call_agent delegations through the durable task core.
+	// When nil, delegation falls back to the legacy in-process path and
+	// task continuations are rejected.
+	Tasks TaskStarter
+	// TaskQuestions optionally wires the task-correlated question
+	// transport (internal/agent/taskquestion) for child runs. When set,
+	// children get the question tool backed by it; when nil, children
+	// keep having no question tool.
+	TaskQuestions tools.TaskQuestionTransport
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -194,21 +251,23 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	skillTracker := skills.NewTracker(activeSkills)
 
 	c := &coordinator{
-		cfg:          opts.Config,
-		sessions:     opts.Sessions,
-		messages:     opts.Messages,
-		permissions:  opts.Permissions,
-		questions:    opts.Questions,
-		history:      opts.History,
-		filetracker:  opts.FileTracker,
-		lspManager:   opts.LSPManager,
-		notify:       opts.Notify,
-		runComplete:  opts.RunComplete,
-		agents:       make(map[string]SessionAgent),
-		allSkills:    allSkills,
-		activeSkills: activeSkills,
-		skillTracker: skillTracker,
-		interactive:  opts.Interactive,
+		cfg:           opts.Config,
+		sessions:      opts.Sessions,
+		messages:      opts.Messages,
+		permissions:   opts.Permissions,
+		questions:     opts.Questions,
+		history:       opts.History,
+		filetracker:   opts.FileTracker,
+		lspManager:    opts.LSPManager,
+		notify:        opts.Notify,
+		runComplete:   opts.RunComplete,
+		agents:        make(map[string]SessionAgent),
+		allSkills:     allSkills,
+		activeSkills:  activeSkills,
+		skillTracker:  skillTracker,
+		interactive:   opts.Interactive,
+		tasks:         opts.Tasks,
+		taskQuestions: opts.TaskQuestions,
 	}
 
 	agentCfg, ok := opts.Config.Config().Agents[config.AgentCoder]
@@ -750,6 +809,21 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		allTools = append(allTools, agentTool)
 	}
 
+	// Task-control tools are primary-only: they inspect, message, and
+	// cancel the caller's own call_agent background tasks through the
+	// manager's owner-authorized control plane. Children never see them,
+	// and they are absent when no task manager (or one without the
+	// control plane) is wired in.
+	if ctrl, ok := c.tasks.(TaskController); ok && !isSubAgent {
+		allTools = append(allTools,
+			newAgentStatusTool(ctrl),
+			newAgentOutputTool(ctrl),
+			newAgentListTool(ctrl),
+			newAgentCancelTool(ctrl),
+			newAgentMessageTool(ctrl),
+		)
+	}
+
 	if slices.Contains(agent.AllowedTools, tools.AgenticFetchToolName) {
 		agenticFetchTool, err := c.agenticFetchTool(ctx, nil)
 		if err != nil {
@@ -794,9 +868,16 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 
-	// Question tool is interactive-only and not available to sub-agents.
+	// Question tool: the primary interactive session keeps the
+	// workspace-global single-slot service. Children never see that
+	// one; when a task-aware transport is wired they get the
+	// task-correlated variant, which only functions inside a task run
+	// because the trusted context carrier decides.
 	if !isSubAgent && c.interactive {
 		allTools = append(allTools, tools.NewQuestionTool(c.questions))
+	}
+	if isSubAgent && c.taskQuestions != nil && slices.Contains(agent.AllowedTools, tools.QuestionToolName) {
+		allTools = append(allTools, tools.NewTaskQuestionTool(c.taskQuestions))
 	}
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
@@ -856,6 +937,15 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
 
+	// Workspace admission wrapper: every tool takes task-run shared
+	// admission (child context only) and the conservative mutating
+	// tools additionally take the process-local FIFO write lease for
+	// this workspace. It is applied before the hook wrap so the fixed
+	// order is primary hookedTool(exclusiveTool(inner)) and child
+	// exclusiveTool(inner): hook denial or halt never acquires a
+	// lease.
+	filteredTools = tools.WrapToolsExclusive(filteredTools, c.cfg.WorkingDir(), tools.WorkspaceLeases())
+
 	// Wrap tools with hook interception for the top-level agent only.
 	// Sub-agents (the `agent` task tool, `agentic_fetch`, etc.) run
 	// without hook interception to avoid firing the user's hook N times
@@ -877,66 +967,46 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		return Model{}, Model{}, errSmallModelNotSelected
 	}
 
-	largeProviderCfg, ok := c.cfg.Config().Providers.Get(largeModelCfg.Provider)
+	large, err := c.buildModel(ctx, largeModelCfg, isSubAgent)
+	if err != nil {
+		return Model{}, Model{}, err
+	}
+	small, err := c.buildModel(ctx, smallModelCfg, true)
+	if err != nil {
+		return Model{}, Model{}, err
+	}
+
+	return large, small, nil
+}
+
+// buildModel constructs a runtime Model from an explicit selection: it
+// resolves the provider, builds the fantasy provider and language model,
+// and attaches the catwalk metadata. Sub-agent traffic always gets a
+// sub-agent provider so copilot-style clients use the shared quota path.
+func (c *coordinator) buildModel(ctx context.Context, sel config.SelectedModel, isSubAgent bool) (Model, error) {
+	providerCfg, ok := c.cfg.Config().Providers.Get(sel.Provider)
 	if !ok {
-		return Model{}, Model{}, errLargeModelProviderNotConfigured
+		return Model{}, fmt.Errorf("%w: %s", errModelProviderNotConfigured, sel.Provider)
 	}
 
-	largeProvider, err := c.buildProvider(largeProviderCfg, largeModelCfg, isSubAgent)
+	provider, err := c.buildProvider(providerCfg, sel, isSubAgent)
 	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, err
 	}
 
-	smallProviderCfg, ok := c.cfg.Config().Providers.Get(smallModelCfg.Provider)
-	if !ok {
-		return Model{}, Model{}, errSmallModelProviderNotConfigured
+	catwalkModel := c.cfg.Config().GetModel(sel.Provider, sel.Model)
+	if catwalkModel == nil {
+		return Model{}, fmt.Errorf("%w: %s/%s", errModelNotFound, sel.Provider, sel.Model)
 	}
 
-	smallProvider, err := c.buildProvider(smallProviderCfg, smallModelCfg, true)
+	modelID := sel.Model
+	if sel.Provider == openrouter.Name && isExactoSupported(modelID) {
+		modelID += ":exacto"
+	}
+
+	languageModel, err := provider.LanguageModel(ctx, modelID)
 	if err != nil {
-		return Model{}, Model{}, err
-	}
-
-	var largeCatwalkModel *catwalk.Model
-	var smallCatwalkModel *catwalk.Model
-
-	for _, m := range largeProviderCfg.Models {
-		if m.ID == largeModelCfg.Model {
-			largeCatwalkModel = &m
-		}
-	}
-	for _, m := range smallProviderCfg.Models {
-		if m.ID == smallModelCfg.Model {
-			smallCatwalkModel = &m
-		}
-	}
-
-	if largeCatwalkModel == nil {
-		return Model{}, Model{}, errLargeModelNotFound
-	}
-
-	if smallCatwalkModel == nil {
-		return Model{}, Model{}, errSmallModelNotFound
-	}
-
-	largeModelID := largeModelCfg.Model
-	smallModelID := smallModelCfg.Model
-
-	if largeModelCfg.Provider == openrouter.Name && isExactoSupported(largeModelID) {
-		largeModelID += ":exacto"
-	}
-
-	if smallModelCfg.Provider == openrouter.Name && isExactoSupported(smallModelID) {
-		smallModelID += ":exacto"
-	}
-
-	largeModel, err := largeProvider.LanguageModel(ctx, largeModelID)
-	if err != nil {
-		return Model{}, Model{}, err
-	}
-	smallModel, err := smallProvider.LanguageModel(ctx, smallModelID)
-	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, err
 	}
 
 	// Bound each request with the configured timeout so unreachable or hung
@@ -947,16 +1017,11 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 	smallModel = newRequestTimeoutModel(smallModel, requestTimeout)
 
 	return Model{
-			Model:      largeModel,
-			CatwalkCfg: *largeCatwalkModel,
-			ModelCfg:   largeModelCfg,
-			FlatRate:   largeProviderCfg.FlatRate,
-		}, Model{
-			Model:      smallModel,
-			CatwalkCfg: *smallCatwalkModel,
-			ModelCfg:   smallModelCfg,
-			FlatRate:   smallProviderCfg.FlatRate,
-		}, nil
+		Model:      languageModel,
+		CatwalkCfg: *catwalkModel,
+		ModelCfg:   sel,
+		FlatRate:   providerCfg.FlatRate,
+	}, nil
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
@@ -1507,9 +1572,22 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.ToolResponse{}, fmt.Errorf("create session: %w", err)
 	}
 
+	return c.executeSubAgent(ctx, params, session.ID)
+}
+
+// executeSubAgent runs params.Agent against an already-created child
+// session and propagates cost to the parent. It is split from runSubAgent so
+// the durable task path can create the child session atomically with the task
+// record (via the task manager) and then reuse the exact same execution, cost
+// accounting, and output handling as the in-process path.
+//
+// The child's execution context carries the caller's delegation depth plus
+// one, so a nested call_agent from within the child is rejected by the task
+// manager's trusted-depth check.
+func (c *coordinator) executeSubAgent(ctx context.Context, params subAgentParams, childSessionID string) (fantasy.ToolResponse, error) {
 	// Call session setup function if provided
 	if params.SessionSetup != nil {
-		params.SessionSetup(session.ID)
+		params.SessionSetup(childSessionID)
 	}
 
 	// Get model configuration
@@ -1524,10 +1602,14 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.ToolResponse{}, errModelProviderNotConfigured
 	}
 
+	// Stamp the child's delegation depth so nested delegation attempts are
+	// attributed to the child, not the parent.
+	childCtx := context.WithValue(ctx, tools.AgentDepthContextKey, tools.GetAgentDepthFromContext(ctx)+1)
+
 	// Run the agent
 	run := func() (*fantasy.AgentResult, error) {
-		return params.Agent.Run(ctx, SessionAgentCall{
-			SessionID:        session.ID,
+		return params.Agent.Run(childCtx, SessionAgentCall{
+			SessionID:        childSessionID,
 			Prompt:           params.Prompt,
 			MaxOutputTokens:  maxTokens,
 			ProviderOptions:  getProviderOptions(model, providerCfg),
@@ -1550,15 +1632,22 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		})
 	}
 	if err != nil {
+		// The profile step limit is a policy decision, not a provider
+		// failure: pass the sentinel through as a Go error so the task
+		// runner can terminalize with the stable task_step_limit reason
+		// instead of embedding it in prose.
+		if errors.Is(err, task.ErrStepLimit) {
+			return fantasy.ToolResponse{}, err
+		}
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}
 
 	// Update parent session cost on a best-effort basis. A failure here must
 	// not discard the sub-agent output that was already produced.
-	if err := c.updateParentSessionCost(ctx, session.ID, params.SessionID); err != nil {
+	if err := c.updateParentSessionCost(ctx, childSessionID, params.SessionID); err != nil {
 		slog.Warn(
 			"Failed to update parent session cost",
-			"child_session", session.ID,
+			"child_session", childSessionID,
 			"parent_session", params.SessionID,
 			"error", err,
 		)

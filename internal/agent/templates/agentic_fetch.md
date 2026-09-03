@@ -1,1 +1,1 @@
-Fetch a URL or search the web using an AI sub-agent that can extract, summarize, and answer questions. Slower and costlier than fetch; use fetch for raw content or API responses.
+Fetch a URL or search the web using an AI sub-agent that can extract, summarize, and answer questions. Runs as an internal background task: the call returns an acceptance and the analysis result is delivered back to you as an untrusted completion report when the task finishes. Slower and costlier than fetch; use fetch for raw content or API responses.

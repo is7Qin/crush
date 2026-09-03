@@ -37,6 +37,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/task"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
@@ -174,6 +175,7 @@ type sessionAgent struct {
 	tools              *csync.Slice[fantasy.AgentTool]
 
 	isSubAgent           bool
+	maxSteps             int
 	sessions             session.Service
 	messages             message.Service
 	disableAutoSummarize bool
@@ -237,6 +239,12 @@ type SessionAgentOptions struct {
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
 	RunComplete          pubsub.Publisher[notify.RunComplete]
+	// MaxSteps, when > 0, bounds the assistant/tool loop: the
+	// (MaxSteps+1)-th PrepareStep fails with task.ErrStepLimit at the
+	// existing step boundary instead of requesting another completion.
+	// Profile-driven children carry their resolved max_steps here; 0
+	// means unlimited (every other caller).
+	MaxSteps int
 }
 
 func NewSessionAgent(
@@ -248,6 +256,7 @@ func NewSessionAgent(
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:         csync.NewValue(opts.SystemPrompt),
 		isSubAgent:           opts.IsSubAgent,
+		maxSteps:             opts.MaxSteps,
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
 		disableAutoSummarize: opts.DisableAutoSummarize,
@@ -818,6 +827,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		TopK:             call.TopK,
 		FrequencyPenalty: call.FrequencyPenalty,
 		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+			// Profile step limit: fail at the step boundary before any
+			// side effects (assistant message, queue drain) so the
+			// (MaxSteps+1)-th completion is never requested. The task
+			// runner maps this sentinel to a stable terminal reason.
+			if a.maxSteps > 0 && options.StepNumber >= a.maxSteps {
+				return callContext, prepared, task.ErrStepLimit
+			}
+
 			prepared.Messages = options.Messages
 			for i := range prepared.Messages {
 				prepared.Messages[i].ProviderOptions = nil

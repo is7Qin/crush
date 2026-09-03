@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/taskquestion"
 	"github.com/charmbracelet/crush/internal/question"
 )
 
@@ -85,55 +86,106 @@ func NewQuestionTool(svc question.Service) fantasy.AgentTool {
 		QuestionToolName,
 		questionDescription,
 		func(ctx context.Context, params QuestionParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			sessionID := GetSessionFromContext(ctx)
-
-			if len(params.Questions) == 0 {
-				return fantasy.NewTextErrorResponse("at least one question is required"), nil
-			}
-			if len(params.Questions) > question.MaxQuestions {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("exceeds maximum of %d questions per batch (got %d). Split into multiple batches and tell the user there will be follow-up questions", question.MaxQuestions, len(params.Questions))), nil
-			}
-
-			questions := make([]question.Question, len(params.Questions))
-			for i, item := range params.Questions {
-				qType := question.Type(item.Type)
-				if qType != question.TypeYesNo && qType != question.TypeSingleChoice && qType != question.TypeMultiChoice && qType != question.TypeFreeText {
-					label := item.Label
-					if label == "" {
-						label = item.Question
-					}
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("question %d [%s]: invalid type %q (must be yes_no, single_choice, multi_choice, or free_text)", i+1, label, item.Type)), nil
-				}
-				questions[i] = question.Question{
-					Type:        qType,
-					Label:       item.Label,
-					Text:        item.Question,
-					Description: item.Description,
-					Choices:     convertChoices(item.GetChoices()),
-				}
-			}
-
-			req := question.Request{
-				SessionID:          sessionID,
-				ToolCallID:         call.ID,
-				Questions:          questions,
-				ConfirmTitle:       params.ConfirmTitle,
-				ConfirmDescription: params.ConfirmDescription,
-			}
-
-			answers, err := svc.Ask(ctx, req)
-			if err != nil {
-				if errors.Is(err, question.ErrCancelled) {
-					resp := fantasy.NewTextErrorResponse("User cancelled this question")
-					resp.StopTurn = true
-					return resp, nil
-				}
-				return fantasy.NewTextErrorResponse(err.Error()), nil
-			}
-
-			return formatAnswers(answers, questions)
+			return askQuestions(ctx, params, call, func(req question.Request) ([]question.Answer, error) {
+				return svc.Ask(ctx, req)
+			})
 		},
 	)
+}
+
+// TaskQuestionTransport is the seam the task-aware question tool needs
+// from the taskquestion service: ask the owner of the calling child's
+// task and block until the question resolves. The production
+// implementation is taskquestion.TaskQuestionService.
+type TaskQuestionTransport interface {
+	AskTask(ctx context.Context, req taskquestion.TaskQuestionRequest) ([]question.Answer, error)
+}
+
+// NewTaskQuestionTool creates the child-run question tool. It keeps the
+// primary tool's schema and answer formatting; the transport is the
+// task-correlated service, and the task identity comes from the
+// trusted TaskQuestionContext the coordinator injects for task runs,
+// never from model arguments. Without task context the transport is
+// unavailable and the call fails as a model-visible tool error.
+func NewTaskQuestionTool(transport TaskQuestionTransport) fantasy.AgentTool {
+	return fantasy.NewAgentTool(
+		QuestionToolName,
+		questionDescription,
+		func(ctx context.Context, params QuestionParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			tc, ok := GetTaskQuestionContextFromContext(ctx)
+			if !ok {
+				return fantasy.NewTextErrorResponse(taskquestion.ErrTransportUnavailable.Error()), nil
+			}
+			return askQuestions(ctx, params, call, func(req question.Request) ([]question.Answer, error) {
+				return transport.AskTask(ctx, taskquestion.TaskQuestionRequest{
+					TaskID:         tc.TaskID,
+					OwnerSessionID: tc.OwnerSessionID,
+					ChildSessionID: tc.ChildSessionID,
+					RunGeneration:  tc.RunGeneration,
+					Batch:          req,
+				})
+			})
+		},
+	)
+}
+
+// askQuestions is the shared body of both question tools: it converts
+// and validates the params, builds the request, runs it through the
+// transport, and formats the answers. question.ErrCancelled from the
+// transport maps to a turn-stopping cancellation response.
+func askQuestions(
+	ctx context.Context,
+	params QuestionParams,
+	call fantasy.ToolCall,
+	ask func(question.Request) ([]question.Answer, error),
+) (fantasy.ToolResponse, error) {
+	sessionID := GetSessionFromContext(ctx)
+
+	if len(params.Questions) == 0 {
+		return fantasy.NewTextErrorResponse("at least one question is required"), nil
+	}
+	if len(params.Questions) > question.MaxQuestions {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("exceeds maximum of %d questions per batch (got %d). Split into multiple batches and tell the user there will be follow-up questions", question.MaxQuestions, len(params.Questions))), nil
+	}
+
+	questions := make([]question.Question, len(params.Questions))
+	for i, item := range params.Questions {
+		qType := question.Type(item.Type)
+		if qType != question.TypeYesNo && qType != question.TypeSingleChoice && qType != question.TypeMultiChoice && qType != question.TypeFreeText {
+			label := item.Label
+			if label == "" {
+				label = item.Question
+			}
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("question %d [%s]: invalid type %q (must be yes_no, single_choice, multi_choice, or free_text)", i+1, label, item.Type)), nil
+		}
+		questions[i] = question.Question{
+			Type:        qType,
+			Label:       item.Label,
+			Text:        item.Question,
+			Description: item.Description,
+			Choices:     convertChoices(item.GetChoices()),
+		}
+	}
+
+	req := question.Request{
+		SessionID:          sessionID,
+		ToolCallID:         call.ID,
+		Questions:          questions,
+		ConfirmTitle:       params.ConfirmTitle,
+		ConfirmDescription: params.ConfirmDescription,
+	}
+
+	answers, err := ask(req)
+	if err != nil {
+		if errors.Is(err, question.ErrCancelled) {
+			resp := fantasy.NewTextErrorResponse("User cancelled this question")
+			resp.StopTurn = true
+			return resp, nil
+		}
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+
+	return formatAnswers(answers, questions)
 }
 
 func convertChoices(in []QuestionChoice) []question.Choice {

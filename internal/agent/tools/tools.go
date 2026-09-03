@@ -15,6 +15,7 @@ type (
 	messageIDContextKey string
 	supportsImagesKey   string
 	modelNameKey        string
+	agentDepthKey       string
 )
 
 const (
@@ -26,6 +27,11 @@ const (
 	SupportsImagesContextKey supportsImagesKey = "supports_images"
 	// ModelNameContextKey is the key for the model name in the context.
 	ModelNameContextKey modelNameKey = "model_name"
+	// AgentDepthContextKey is the key for the trusted delegation depth of
+	// the running agent: 0 for a top-level session, N+1 inside a child
+	// spawned N levels down. It is set by the coordinator, never by tool
+	// arguments, so a forged tool call cannot reset it.
+	AgentDepthContextKey agentDepthKey = "agent_depth"
 )
 
 // getContextValue is a generic helper that retrieves a typed value from context.
@@ -59,6 +65,44 @@ func GetSupportsImagesFromContext(ctx context.Context) bool {
 // GetModelNameFromContext retrieves the model name from the context.
 func GetModelNameFromContext(ctx context.Context) string {
 	return getContextValue(ctx, ModelNameContextKey, "")
+}
+
+// GetAgentDepthFromContext retrieves the trusted delegation depth of the
+// running agent. A missing key means the top-level session, so the default
+// is 0.
+func GetAgentDepthFromContext(ctx context.Context) int {
+	return getContextValue(ctx, AgentDepthContextKey, 0)
+}
+
+// taskQuestionContextKey is the context key for the trusted task
+// question correlation of a child run.
+type taskQuestionContextKey struct{}
+
+// TaskQuestionContext carries the trusted correlation a child run's
+// question transport needs: which task is asking, whose owner session
+// answers, and which child session and run generation the question
+// belongs to. The coordinator sets it when a child executes through
+// the task manager, never from tool arguments, so a forged call
+// cannot redirect a question to another task.
+type TaskQuestionContext struct {
+	TaskID         string
+	OwnerSessionID string
+	ChildSessionID string
+	RunGeneration  uint64
+}
+
+// WithTaskQuestionContext returns a context carrying the trusted task
+// question correlation tc.
+func WithTaskQuestionContext(ctx context.Context, tc TaskQuestionContext) context.Context {
+	return context.WithValue(ctx, taskQuestionContextKey{}, tc)
+}
+
+// GetTaskQuestionContextFromContext retrieves the task question
+// correlation. A missing value means the run is not a task child, so
+// the task-aware question transport is unavailable.
+func GetTaskQuestionContextFromContext(ctx context.Context) (TaskQuestionContext, bool) {
+	tc, ok := ctx.Value(taskQuestionContextKey{}).(TaskQuestionContext)
+	return tc, ok
 }
 
 // NewPermissionDeniedResponse returns a tool response indicating the user
