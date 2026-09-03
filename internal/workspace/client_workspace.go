@@ -12,6 +12,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/task"
+	"github.com/charmbracelet/crush/internal/agent/taskquestion"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/client"
@@ -433,6 +435,84 @@ func (w *ClientWorkspace) QuestionCancel() bool {
 		return false
 	}
 	return cancelled
+}
+
+// -- Tasks --
+
+// TaskList lists the caller's tasks. The owner identity is derived
+// server-side from this client's attached current-session binding;
+// parentSessionID is an optional filter the server only accepts when
+// it equals that identity.
+func (w *ClientWorkspace) TaskList(ctx context.Context, parentSessionID string) ([]proto.TaskSnapshot, error) {
+	resp, err := w.client.TaskList(ctx, w.workspaceID(), parentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Tasks, nil
+}
+
+func (w *ClientWorkspace) TaskGet(ctx context.Context, taskID string) (proto.TaskSnapshot, error) {
+	return w.client.TaskGet(ctx, w.workspaceID(), taskID)
+}
+
+func (w *ClientWorkspace) TaskOutput(ctx context.Context, taskID string) (proto.TaskOutputResponse, error) {
+	return w.client.TaskOutput(ctx, w.workspaceID(), taskID)
+}
+
+func (w *ClientWorkspace) TaskCancel(ctx context.Context, taskID string) (proto.AgentCancelAccepted, error) {
+	return w.client.TaskCancel(ctx, w.workspaceID(), taskID)
+}
+
+func (w *ClientWorkspace) TaskSendMessage(ctx context.Context, taskID, prompt string, attachments ...proto.Attachment) (proto.ChildMessageAccepted, error) {
+	return w.client.SendChildMessage(ctx, w.workspaceID(), taskID, prompt, attachments)
+}
+
+// TaskResync is the durable reconnect recovery read: task snapshots,
+// undelivered outbox and inbox rows, and unresolved task questions,
+// scoped server-side to this client's current session.
+func (w *ClientWorkspace) TaskResync(ctx context.Context) (proto.TaskResyncResponse, error) {
+	return w.client.TasksResync(ctx, w.workspaceID())
+}
+
+// -- Task questions --
+
+func (w *ClientWorkspace) TaskQuestionsPending(ctx context.Context) ([]proto.TaskQuestion, error) {
+	resp, err := w.client.TaskQuestionsPending(ctx, w.workspaceID())
+	if err != nil {
+		return nil, err
+	}
+	return resp.Questions, nil
+}
+
+func (w *ClientWorkspace) TaskQuestionAnswer(questionID string, responses []question.Answer) bool {
+	req := proto.TaskQuestionAnswerRequest{
+		QuestionID: questionID,
+		Responses:  make([]proto.TaskQuestionAnswer, len(responses)),
+	}
+	for i, r := range responses {
+		req.Responses[i] = proto.TaskQuestionAnswer{
+			QuestionID:  r.QuestionID,
+			SelectedIDs: r.SelectedIDs,
+			FillInText:  r.FillInText,
+			Yes:         r.Yes,
+			Notes:       r.Notes,
+		}
+	}
+	resolved, err := w.client.AnswerTaskQuestion(context.Background(), w.workspaceID(), req)
+	if err != nil {
+		slog.Error("Failed to answer task question", "question_id", questionID, "error", err)
+		return false
+	}
+	return resolved
+}
+
+func (w *ClientWorkspace) TaskQuestionCancel(questionID string) bool {
+	resolved, err := w.client.CancelTaskQuestion(context.Background(), w.workspaceID(), questionID)
+	if err != nil {
+		slog.Error("Failed to cancel task question", "question_id", questionID, "error", err)
+		return false
+	}
+	return resolved
 }
 
 // -- FileTracker --
@@ -1141,6 +1221,29 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				BatchID: e.Payload.BatchID,
 			},
 		}
+	case pubsub.Event[proto.AgentTaskEvent]:
+		// Rebuild the domain task event from the wire fact so the TUI
+		// observes the same pubsub.Event[task.Event] it gets from the
+		// in-process broker in local mode, correlation ids included.
+		return pubsub.Event[task.Event]{
+			Type:    e.Type,
+			Payload: task.Event{Type: task.EventType(e.Payload.Type), Task: taskFromWire(e.Payload)},
+		}
+	case pubsub.Event[proto.TaskQuestion]:
+		return pubsub.Event[taskquestion.TaskQuestion]{
+			Type:    e.Type,
+			Payload: taskQuestionFromWire(e.Payload),
+		}
+	case pubsub.Event[proto.TaskQuestionNotification]:
+		return pubsub.Event[taskquestion.Notification]{
+			Type: e.Type,
+			Payload: taskquestion.Notification{
+				QuestionID: e.Payload.QuestionID,
+				TaskID:     e.Payload.TaskID,
+				BatchID:    e.Payload.BatchID,
+				Resolution: taskquestion.Resolution(e.Payload.Resolution),
+			},
+		}
 	case pubsub.Event[proto.Message]:
 		return pubsub.Event[message.Message]{
 			Type:    e.Type,
@@ -1436,4 +1539,69 @@ func protoQuestionsToDomain(qs []proto.QuestionItem) []question.Question {
 		}
 	}
 	return out
+}
+
+// taskFromWire rebuilds the domain task snapshot carried by a task
+// lifecycle event. The wire fact is metadata and correlation ids
+// only; consumers that need full output query the task routes.
+func taskFromWire(ev proto.AgentTaskEvent) *task.Task {
+	at, err := proto.ParseWireTime(ev.At)
+	if err != nil {
+		at = time.Now().UTC()
+	}
+	return &task.Task{
+		ID:              ev.TaskID,
+		ParentSessionID: ev.ParentSessionID,
+		ChildSessionID:  ev.ChildSessionID,
+		ParentMessageID: ev.ParentMessageID,
+		ToolCallID:      ev.ToolCallID,
+		Profile:         ev.Profile,
+		Provider:        ev.ResolvedProvider,
+		Model:           ev.ResolvedModel,
+		Status:          task.Status(ev.Status),
+		Summary:         ev.Summary,
+		Err:             ev.Error,
+		RunGeneration:   ev.RunGeneration,
+		UpdatedAt:       at,
+	}
+}
+
+// taskQuestionFromWire rebuilds the domain question record from its
+// transport projection so the TUI sees the same payload type local
+// mode publishes.
+func taskQuestionFromWire(w proto.TaskQuestion) taskquestion.TaskQuestion {
+	createdAt, _ := proto.ParseWireTime(w.CreatedAt)
+	var resolvedAt time.Time
+	if w.ResolvedAt != nil {
+		resolvedAt, _ = proto.ParseWireTime(*w.ResolvedAt)
+	}
+	answers := make([]question.Answer, len(w.Answers))
+	for i, a := range w.Answers {
+		answers[i] = question.Answer{
+			QuestionID:  a.QuestionID,
+			SelectedIDs: a.SelectedIDs,
+			FillInText:  a.FillInText,
+			Yes:         a.Yes,
+			Notes:       a.Notes,
+		}
+	}
+	return taskquestion.TaskQuestion{
+		QuestionID:     w.QuestionID,
+		TaskID:         w.TaskID,
+		OwnerSessionID: w.OwnerSessionID,
+		ChildSessionID: w.ChildSessionID,
+		RunGeneration:  w.RunGeneration,
+		Batch: question.Request{
+			ID:                 w.Batch.ID,
+			SessionID:          w.Batch.SessionID,
+			ToolCallID:         w.Batch.ToolCallID,
+			Questions:          protoQuestionsToDomain(w.Batch.Questions),
+			ConfirmTitle:       w.Batch.ConfirmTitle,
+			ConfirmDescription: w.Batch.ConfirmDescription,
+		},
+		Answers:    answers,
+		Resolution: taskquestion.Resolution(w.Resolution),
+		CreatedAt:  createdAt,
+		ResolvedAt: resolvedAt,
+	}
 }

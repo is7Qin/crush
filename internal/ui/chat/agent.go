@@ -27,6 +27,52 @@ type AgentToolMessageItem struct {
 	*baseToolMessageItem
 
 	nestedTools []ToolMessageItem
+	// task holds the latest durable call_agent task fact mirrored by
+	// tool call id. It starts zero until a task event for this
+	// delegation's tool call arrives.
+	task TaskState
+}
+
+// TaskState is the latest durable call_agent task fact mirrored onto
+// an agent tool item. It carries both correlation ids plus the run
+// generation so a superseded attempt's late event cannot replace a
+// newer attempt's state.
+type TaskState struct {
+	TaskID string
+	// Event names the lifecycle fact (created, started, ...) and
+	// Status the task's current status.
+	Event    string
+	Status   string
+	Revision uint64
+}
+
+// TaskStateTracker is an opt-in interface for tool items that mirror
+// durable task lifecycle facts correlated by task id + tool call id.
+type TaskStateTracker interface {
+	SetTaskState(TaskState)
+	TaskState() TaskState
+}
+
+var _ TaskStateTracker = (*AgentToolMessageItem)(nil)
+
+// SetTaskState records a task lifecycle fact for this delegation. A
+// state belonging to a different task is accepted only at a newer or
+// equal run generation, keeping continuation attempts monotonic.
+func (a *AgentToolMessageItem) SetTaskState(s TaskState) {
+	if s.TaskID == "" {
+		return
+	}
+	if a.task.TaskID == s.TaskID && s.Revision < a.task.Revision {
+		return
+	}
+	a.task = s
+	a.clearCache()
+	a.Bump()
+}
+
+// TaskState returns the most recent task fact mirrored on this item.
+func (a *AgentToolMessageItem) TaskState() TaskState {
+	return a.task
 }
 
 var (
@@ -164,6 +210,20 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 			promptText,
 		),
 	)
+
+	// Mirror the durable task lifecycle once task events have
+	// correlated to this delegation. Items without task state render
+	// exactly as before.
+	if r.agent.task.TaskID != "" && r.agent.task.Status != "" {
+		statusLine := sty.Tool.AgentTaskTag.Render("Task " + r.agent.task.Status)
+		idLine := sty.Tool.AgentPrompt.Width(remainingWidth).Render(r.agent.task.TaskID)
+		header = lipgloss.JoinVertical(
+			lipgloss.Left,
+			header,
+			"",
+			lipgloss.JoinHorizontal(lipgloss.Left, statusLine, " ", idLine),
+		)
+	}
 
 	// Build tree with nested tool calls.
 	childTools := tree.Root(header)

@@ -29,6 +29,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/task"
+	"github.com/charmbracelet/crush/internal/agent/taskquestion"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
@@ -270,6 +272,22 @@ type UI struct {
 	// inlineCursor stores the cursor from the last inline editor
 	// Draw call, used by the cursor positioning logic below.
 	inlineCursor *tea.Cursor
+
+	// activeQuestionKey correlates the open question form (when
+	// activeInline is a *dialog.QuestionForm) with the question it
+	// presents: the batch id for a primary question, the task
+	// question id for a child question. Resolution events reconcile
+	// only the form whose key matches.
+	activeQuestionKey string
+	// activeTaskQuestion is the child question record behind the
+	// open form when the key is a task question id; nil for primary
+	// question forms and when no form is open.
+	activeTaskQuestion *taskquestion.TaskQuestion
+	// pendingTaskQuestions queues child questions that arrive while
+	// another question form holds the editor slot. Each stays keyed
+	// by question id, and a matching resolution notification removes
+	// it before promotion.
+	pendingTaskQuestions []taskquestion.TaskQuestion
 
 	// Attachment list
 	attachments *attachments.Attachments
@@ -1020,6 +1038,21 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pubsub.Event[question.Notification]:
 		m.handleQuestionNotification(msg.Payload)
+	case pubsub.Event[taskquestion.TaskQuestion]:
+		m.openTaskQuestionDialog(msg.Payload)
+		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.sendNotification(notification.Notification{
+			Title:   "Crush is waiting...",
+			Message: fmt.Sprintf("%d questions need your input", len(msg.Payload.Batch.Questions)),
+		}); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case pubsub.Event[taskquestion.Notification]:
+		m.handleTaskQuestionNotification(msg.Payload)
+	case pubsub.Event[task.Event]:
+		m.handleTaskEvent(msg.Payload)
 	case cancelTimerExpiredMsg:
 		m.isCanceling = false
 	case tea.TerminalVersionMsg:
@@ -2534,6 +2567,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		if done, cmd := m.activeInline.HandleKey(msg); done {
 			m.activeInline = nil
 			m.textarea.Focus()
+			// A submitted or cancelled question form frees its
+			// correlation slot; a queued child question may take it.
+			m.clearActiveQuestion()
 			m.updateLayoutAndSize()
 		} else {
 			if cmd != nil {
@@ -4635,9 +4671,14 @@ func (m *UI) openPermissionsDialog(perm permission.PermissionRequest) tea.Cmd {
 
 // openBatchFormDialog activates a tabbed multi-question form in
 // the editor area. Single questions render without tabs or confirm.
+// The form is keyed by the batch id so a primary resolution only
+// reconciles the primary form.
 func (m *UI) openBatchFormDialog(batch question.Request) {
-	// Close any existing question form first to prevent stacking.
-	if qf, ok := m.activeInline.(*dialog.QuestionForm); ok && qf != nil {
+	// A primary question takes the editor slot. If a child question
+	// currently owns it, requeue that record: it stays pending in the
+	// task-question service and resurfaces once the slot frees.
+	m.requeueActiveTaskQuestion()
+	if _, ok := m.activeInline.(*dialog.QuestionForm); ok {
 		m.activeInline = nil
 	}
 
@@ -4649,22 +4690,145 @@ func (m *UI) openBatchFormDialog(batch question.Request) {
 		m.com.Workspace.QuestionCancel()
 	}
 	m.activeInline = form
+	m.activeQuestionKey = batch.ID
+	m.activeTaskQuestion = nil
 	m.textarea.Blur()
 	m.focus = uiFocusEditor
 	m.activeInline.SetFocused(true)
 	m.updateLayoutAndSize()
 }
 
-// handleQuestionNotification dismisses an open question form when
-// any client resolved the pending batch. Only one question can be
-// pending at a time, so any notification means the current form
-// is stale regardless of BatchID.
-func (m *UI) handleQuestionNotification(_ question.Notification) {
-	if _, ok := m.activeInline.(*dialog.QuestionForm); ok {
+// openTaskQuestionDialog routes one child question through the same
+// question form, keyed by its question id. Child questions never
+// displace a live form: they queue FIFO and the queue is drained when
+// the slot frees.
+func (m *UI) openTaskQuestionDialog(q taskquestion.TaskQuestion) {
+	if m.activeInline != nil {
+		for _, p := range m.pendingTaskQuestions {
+			if p.QuestionID == q.QuestionID {
+				return
+			}
+		}
+		m.pendingTaskQuestions = append(m.pendingTaskQuestions, q)
+		return
+	}
+	m.showTaskQuestionForm(q)
+}
+
+// showTaskQuestionForm presents one child question in the existing
+// question dialog with answer and cancel routed by question id. All
+// state mutation stays inside Update; the Workspace calls run only
+// when the user submits or cancels the form.
+func (m *UI) showTaskQuestionForm(q taskquestion.TaskQuestion) {
+	questionID := q.QuestionID
+	form := dialog.NewQuestionForm(m.com.Styles, q.Batch)
+	form.OnAnswer = func(responses []question.Answer) {
+		m.com.Workspace.TaskQuestionAnswer(questionID, responses)
+	}
+	form.OnCancel = func() {
+		m.com.Workspace.TaskQuestionCancel(questionID)
+	}
+	m.activeInline = form
+	m.activeQuestionKey = questionID
+	m.activeTaskQuestion = &q
+	m.textarea.Blur()
+	m.focus = uiFocusEditor
+	m.activeInline.SetFocused(true)
+	m.updateLayoutAndSize()
+}
+
+// requeueActiveTaskQuestion puts an open child question back at the
+// head of the pending queue when another question takes the editor
+// slot. No-op for primary forms and when nothing is open.
+func (m *UI) requeueActiveTaskQuestion() {
+	if m.activeTaskQuestion == nil {
+		return
+	}
+	q := *m.activeTaskQuestion
+	m.activeTaskQuestion = nil
+	m.pendingTaskQuestions = append(
+		[]taskquestion.TaskQuestion{q}, m.pendingTaskQuestions...,
+	)
+}
+
+// clearActiveQuestion drops the open question form's correlation
+// state and promotes the next queued child question if the slot is
+// free. Callers pair this with their own activeInline teardown.
+func (m *UI) clearActiveQuestion() {
+	m.activeQuestionKey = ""
+	m.activeTaskQuestion = nil
+	m.promoteNextTaskQuestion()
+}
+
+// promoteNextTaskQuestion shows the oldest still-unresolved queued
+// child question when the editor slot is free.
+func (m *UI) promoteNextTaskQuestion() {
+	if m.activeInline != nil || len(m.pendingTaskQuestions) == 0 {
+		return
+	}
+	next := m.pendingTaskQuestions[0]
+	m.pendingTaskQuestions = m.pendingTaskQuestions[1:]
+	m.showTaskQuestionForm(next)
+}
+
+// handleTaskQuestionNotification reconciles exactly the question the
+// notification names: the open form when its id matches, otherwise
+// the queued entry. No other dialog state is touched.
+func (m *UI) handleTaskQuestionNotification(n taskquestion.Notification) {
+	if m.activeTaskQuestion != nil && m.activeTaskQuestion.QuestionID == n.QuestionID {
 		m.activeInline = nil
 		m.textarea.Focus()
+		m.clearActiveQuestion()
 		m.updateLayoutAndSize()
+		return
 	}
+	for i, q := range m.pendingTaskQuestions {
+		if q.QuestionID == n.QuestionID {
+			m.pendingTaskQuestions = append(
+				m.pendingTaskQuestions[:i:i], m.pendingTaskQuestions[i+1:]...,
+			)
+			return
+		}
+	}
+}
+
+// handleTaskEvent correlates one durable task lifecycle fact with the
+// call_agent tool item that admitted it, by tool call id. The event's
+// task id is verified against the item's tracked task so a late
+// update from a superseded attempt can never clobber current state.
+func (m *UI) handleTaskEvent(ev task.Event) {
+	if ev.Task == nil || ev.Task.ID == "" || ev.Task.ToolCallID == "" {
+		return
+	}
+	item := m.chat.MessageItem(ev.Task.ToolCallID)
+	tracker, ok := item.(chat.TaskStateTracker)
+	if !ok {
+		return
+	}
+	tracker.SetTaskState(chat.TaskState{
+		TaskID:   ev.Task.ID,
+		Event:    string(ev.Type),
+		Status:   string(ev.Task.Status),
+		Revision: ev.Task.RunGeneration,
+	})
+}
+
+// handleQuestionNotification dismisses an open question form when
+// any client resolved the pending batch. Primary batches are keyed by
+// batch id, so an open child-question form is left untouched: its
+// reconciliation runs through the task-question notification path.
+func (m *UI) handleQuestionNotification(n question.Notification) {
+	qf, ok := m.activeInline.(*dialog.QuestionForm)
+	if !ok {
+		return
+	}
+	if n.BatchID != "" && qf.BatchID != n.BatchID {
+		return
+	}
+	m.activeInline = nil
+	m.textarea.Focus()
+	m.clearActiveQuestion()
+	m.updateLayoutAndSize()
 }
 
 // editorContentWidth returns the content width available to the

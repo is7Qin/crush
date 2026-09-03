@@ -2,15 +2,18 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
+	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
@@ -31,6 +34,12 @@ import (
 type AppWorkspace struct {
 	app   *app.App
 	store *config.ConfigStore
+
+	// mu guards currentSession, the owner identity task control uses
+	// in local mode (the server-mode equivalent is derived from the
+	// attached client's current-session binding).
+	mu             sync.RWMutex
+	currentSession string
 }
 
 // NewAppWorkspace creates a new AppWorkspace wrapping the given app
@@ -72,13 +81,27 @@ func (w *AppWorkspace) ParseAgentToolSessionID(sessionID string) (string, string
 	return w.app.Sessions.ParseAgentToolSessionID(sessionID)
 }
 
-// SetCurrentSession reports the active session to herdr so the pane
-// can persist a resumable reference. Multi-client presence tracking
-// is irrelevant in single-client local mode, but herdr still needs
-// to know which session is live to support agent resume.
+// SetCurrentSession records the active session as the local task-owner
+// identity and reports it to herdr so the pane can persist a
+// resumable reference. Multi-client presence tracking is irrelevant in
+// single-client local mode, but herdr and the task control plane still
+// need to know which session is live.
 func (w *AppWorkspace) SetCurrentSession(ctx context.Context, sessionID string) error {
 	w.app.ReportCurrentSession(sessionID)
+	w.mu.Lock()
+	w.currentSession = sessionID
+	w.mu.Unlock()
 	return nil
+}
+
+// taskCaller returns the trusted owner session for local task control.
+func (w *AppWorkspace) taskCaller() (string, error) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.currentSession == "" {
+		return "", ErrNoCurrentSession
+	}
+	return w.currentSession, nil
 }
 
 // -- Messages --
@@ -272,6 +295,169 @@ func (w *AppWorkspace) QuestionAnswer(responses []question.Answer) bool {
 
 func (w *AppWorkspace) QuestionCancel() bool {
 	return w.app.Questions.Cancel()
+}
+
+// -- Tasks --
+
+func (w *AppWorkspace) taskControl() (backend.TaskControl, error) {
+	return backend.TaskControlFromApp(w.app)
+}
+
+func (w *AppWorkspace) TaskList(ctx context.Context, parentSessionID string) ([]proto.TaskSnapshot, error) {
+	caller, err := w.taskCaller()
+	if err != nil {
+		return nil, err
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		return nil, err
+	}
+	return tc.List(ctx, caller, parentSessionID)
+}
+
+func (w *AppWorkspace) TaskGet(ctx context.Context, taskID string) (proto.TaskSnapshot, error) {
+	caller, err := w.taskCaller()
+	if err != nil {
+		return proto.TaskSnapshot{}, err
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		return proto.TaskSnapshot{}, err
+	}
+	return tc.Get(ctx, caller, taskID)
+}
+
+func (w *AppWorkspace) TaskOutput(ctx context.Context, taskID string) (proto.TaskOutputResponse, error) {
+	snap, err := w.TaskGet(ctx, taskID)
+	if err != nil {
+		return proto.TaskOutputResponse{}, err
+	}
+	return proto.TaskOutputResponse{
+		TaskID:    snap.ID,
+		Status:    snap.Status,
+		Result:    snap.Result,
+		Summary:   snap.Summary,
+		Error:     snap.Error,
+		Truncated: snap.Truncated,
+	}, nil
+}
+
+func (w *AppWorkspace) TaskCancel(ctx context.Context, taskID string) (proto.AgentCancelAccepted, error) {
+	caller, err := w.taskCaller()
+	if err != nil {
+		return proto.AgentCancelAccepted{}, err
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		return proto.AgentCancelAccepted{}, err
+	}
+	return tc.Cancel(ctx, caller, taskID)
+}
+
+func (w *AppWorkspace) TaskSendMessage(ctx context.Context, taskID, prompt string, attachments ...proto.Attachment) (proto.ChildMessageAccepted, error) {
+	caller, err := w.taskCaller()
+	if err != nil {
+		return proto.ChildMessageAccepted{}, err
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		return proto.ChildMessageAccepted{}, err
+	}
+	encoded := "[]"
+	if len(attachments) > 0 {
+		raw, err := json.Marshal(attachments)
+		if err != nil {
+			return proto.ChildMessageAccepted{}, fmt.Errorf("encode attachments: %w", err)
+		}
+		encoded = string(raw)
+	}
+	return tc.AppendChildMessage(ctx, backend.ChildMessageInput{
+		CallerSessionID: caller,
+		TaskID:          taskID,
+		Prompt:          prompt,
+		Attachments:     encoded,
+	})
+}
+
+func (w *AppWorkspace) TaskResync(ctx context.Context) (proto.TaskResyncResponse, error) {
+	caller, err := w.taskCaller()
+	if err != nil {
+		return proto.TaskResyncResponse{}, err
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		return proto.TaskResyncResponse{}, err
+	}
+	return tc.Resync(ctx, caller)
+}
+
+// -- Task questions --
+
+func (w *AppWorkspace) TaskQuestionsPending(ctx context.Context) ([]proto.TaskQuestion, error) {
+	caller, err := w.taskCaller()
+	if err != nil {
+		return nil, err
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		return nil, err
+	}
+	return tc.PendingQuestions(ctx, caller)
+}
+
+func (w *AppWorkspace) TaskQuestionAnswer(questionID string, responses []question.Answer) bool {
+	caller, err := w.taskCaller()
+	if err != nil {
+		slog.Error("Failed to resolve task question without a current session", "question_id", questionID, "error", err)
+		return false
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		slog.Error("Failed to access task question service", "error", err)
+		return false
+	}
+	resolved, err := tc.AnswerQuestion(context.Background(), caller, proto.TaskQuestionAnswerRequest{
+		QuestionID: questionID,
+		Responses:  taskQuestionAnswerWire(responses),
+	})
+	if err != nil {
+		slog.Error("Failed to answer task question", "question_id", questionID, "error", err)
+		return false
+	}
+	return resolved
+}
+
+func (w *AppWorkspace) TaskQuestionCancel(questionID string) bool {
+	caller, err := w.taskCaller()
+	if err != nil {
+		slog.Error("Failed to cancel task question without a current session", "question_id", questionID, "error", err)
+		return false
+	}
+	tc, err := w.taskControl()
+	if err != nil {
+		slog.Error("Failed to access task question service", "error", err)
+		return false
+	}
+	resolved, err := tc.CancelQuestion(context.Background(), caller, questionID)
+	if err != nil {
+		slog.Error("Failed to cancel task question", "question_id", questionID, "error", err)
+		return false
+	}
+	return resolved
+}
+
+func taskQuestionAnswerWire(responses []question.Answer) []proto.TaskQuestionAnswer {
+	out := make([]proto.TaskQuestionAnswer, len(responses))
+	for i, r := range responses {
+		out[i] = proto.TaskQuestionAnswer{
+			QuestionID:  r.QuestionID,
+			SelectedIDs: r.SelectedIDs,
+			FillInText:  r.FillInText,
+			Yes:         r.Yes,
+			Notes:       r.Notes,
+		}
+	}
+	return out
 }
 
 // -- FileTracker --

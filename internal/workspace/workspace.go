@@ -46,6 +46,10 @@ var (
 	// the meantime are lost for good, so the client treats it as a
 	// degraded link that requires a resync.
 	ErrStreamClosed = errors.New("the event stream closed; reconnecting")
+	// ErrNoCurrentSession means the local workspace has not been told
+	// which session is active yet, so there is no task owner identity
+	// to authorize task control against.
+	ErrNoCurrentSession = errors.New("the workspace has no current session")
 )
 
 // ConnectionState describes the health of the client-server link as
@@ -181,6 +185,42 @@ type Workspace interface {
 
 	// QuestionCancel cancels the pending question.
 	QuestionCancel() bool
+
+	// Tasks
+	//
+	// Durable call_agent task control. The owner session is never a
+	// parameter: client/server mode derives it server-side from the
+	// attached client's current-session binding, and local mode uses
+	// the current session most recently reported through
+	// SetCurrentSession.
+	//
+	// TaskList lists the caller's tasks; parentSessionID is an
+	// optional filter that must equal the caller identity.
+	TaskList(ctx context.Context, parentSessionID string) ([]proto.TaskSnapshot, error)
+	// TaskGet returns one owned task snapshot.
+	TaskGet(ctx context.Context, taskID string) (proto.TaskSnapshot, error)
+	// TaskOutput returns the bounded stored result of an owned task.
+	TaskOutput(ctx context.Context, taskID string) (proto.TaskOutputResponse, error)
+	// TaskCancel cancels the owned task's current non-terminal attempt.
+	TaskCancel(ctx context.Context, taskID string) (proto.AgentCancelAccepted, error)
+	// TaskSendMessage appends a direct user message to the task's
+	// child conversation, returning the accepted mailbox metadata.
+	TaskSendMessage(ctx context.Context, taskID, prompt string, attachments ...proto.Attachment) (proto.ChildMessageAccepted, error)
+	// TaskResync is the durable reconnect recovery read for the
+	// caller's current session: task snapshots, undelivered outbox
+	// and inbox rows, and unresolved task questions.
+	TaskResync(ctx context.Context) (proto.TaskResyncResponse, error)
+
+	// Task questions
+	//
+	// TaskQuestionsPending lists the caller's unresolved child
+	// questions for resync.
+	TaskQuestionsPending(ctx context.Context) ([]proto.TaskQuestion, error)
+	// TaskQuestionAnswer resolves one task question by question id.
+	TaskQuestionAnswer(questionID string, responses []question.Answer) bool
+	// TaskQuestionCancel resolves one task question as cancelled by
+	// question id.
+	TaskQuestionCancel(questionID string) bool
 
 	// FileTracker
 	FileTrackerRecordRead(ctx context.Context, sessionID, path string)

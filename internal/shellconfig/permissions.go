@@ -39,6 +39,26 @@ func handlePermissions(ctx context.Context, args []string, stdin io.Reader, stdo
 	}
 }
 
+// delegationToolName and legacyAgentToolName duplicate
+// config.DelegationToolName and the legacy permission entry name.
+// internal/shellconfig must not import internal/config (config imports
+// this package), so the pair lives here. New writes migrate the legacy
+// `agent` name to call_agent: the delegation tool is the only live
+// implementation, and permission serialization never re-emits `agent`.
+const (
+	delegationToolName  = "call_agent"
+	legacyAgentToolName = "agent"
+)
+
+// permissionToolName maps a user-typed permission entry to its
+// canonical live tool name, folding the legacy delegation name.
+func permissionToolName(name string) string {
+	if name == legacyAgentToolName {
+		return delegationToolName
+	}
+	return name
+}
+
 func permissionsAllow(b *ConfigBuilder, args []string, stderr io.Writer) error {
 	if len(args) < 3 {
 		return usage(stderr, "usage: permissions allow <tool> [<tool> ...]")
@@ -47,6 +67,7 @@ func permissionsAllow(b *ConfigBuilder, args []string, stderr io.Writer) error {
 	allowed, _ := perms["allowed_tools"].([]any)
 
 	for _, tool := range args[2:] {
+		tool = permissionToolName(tool)
 		if !containsAny(allowed, tool) {
 			allowed = append(allowed, tool)
 		}
@@ -67,6 +88,7 @@ func permissionsDeny(b *ConfigBuilder, args []string, stderr io.Writer) error {
 	disabled, _ := opts["disabled_tools"].([]any)
 
 	for _, tool := range args[2:] {
+		tool = permissionToolName(tool)
 		if !containsAny(disabled, tool) {
 			disabled = append(disabled, tool)
 		}
