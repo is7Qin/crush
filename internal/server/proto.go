@@ -1213,3 +1213,11 @@ func jsonError(w http.ResponseWriter, status int, message string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(proto.Error{Message: message})
 }
+
+// jsonErrorCode writes the typed error envelope with a stable code so
+// clients can classify failures without matching prose.
+func jsonErrorCode(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(proto.Error{Message: message, Code: code})
+}

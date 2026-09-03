@@ -207,6 +207,27 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				if !sendEvent(ctx, events, e) {
 					return
 				}
+			case pubsub.PayloadTypeTaskEvent:
+				var e pubsub.Event[proto.AgentTaskEvent]
+				if err := json.Unmarshal(p.Payload, &e); err != nil {
+					slog.Warn("Unmarshaling task event", "error", err)
+					continue
+				}
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeTaskQuestionRequest:
+				var e pubsub.Event[proto.TaskQuestion]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeTaskQuestionNotification:
+				var e pubsub.Event[proto.TaskQuestionNotification]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
 			case pubsub.PayloadTypeMessage:
 				var e pubsub.Event[proto.Message]
 				_ = json.Unmarshal(p.Payload, &e)

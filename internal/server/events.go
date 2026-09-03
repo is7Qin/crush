@@ -7,6 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/task"
+	"github.com/charmbracelet/crush/internal/agent/taskquestion"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
@@ -97,6 +99,42 @@ func wrapEvent(ev any) *pubsub.Payload {
 			Type: e.Type,
 			Payload: proto.QuestionNotification{
 				BatchID: e.Payload.BatchID,
+			},
+		})
+	case pubsub.Event[task.Event]:
+		// call_agent task lifecycle facts ride the same envelope as
+		// everything else; the durable task row stays the source of
+		// truth and this event carries only metadata and the
+		// task_id + tool_call_id correlation pair. Hidden
+		// system-owned (agentic_fetch) facts never serialize onto
+		// the shared stream: this is the wire's only live task-event
+		// serializer, so the gate also covers durable outbox replays
+		// that republish hidden records onto the broker. Durable
+		// rows, internal drains, and resync filtering are untouched.
+		if e.Payload.Task.IsHidden() {
+			slog.Debug("Dropping hidden task event for SSE", "task_id", e.Payload.Task.ID)
+			return nil
+		}
+		return envelope(pubsub.PayloadTypeTaskEvent, pubsub.Event[proto.AgentTaskEvent]{
+			Type:    e.Type,
+			Payload: backend.TaskEventToWire(e.Payload),
+		})
+	case pubsub.Event[taskquestion.TaskQuestion]:
+		// A child question batch: the extended projection carries the
+		// full correlated record so clients never confuse it with a
+		// primary question.
+		return envelope(pubsub.PayloadTypeTaskQuestionRequest, pubsub.Event[proto.TaskQuestion]{
+			Type:    e.Type,
+			Payload: backend.TaskQuestionToWire(e.Payload),
+		})
+	case pubsub.Event[taskquestion.Notification]:
+		return envelope(pubsub.PayloadTypeTaskQuestionNotification, pubsub.Event[proto.TaskQuestionNotification]{
+			Type: e.Type,
+			Payload: proto.TaskQuestionNotification{
+				QuestionID: e.Payload.QuestionID,
+				TaskID:     e.Payload.TaskID,
+				BatchID:    e.Payload.BatchID,
+				Resolution: string(e.Payload.Resolution),
 			},
 		})
 	case pubsub.Event[message.Message]:

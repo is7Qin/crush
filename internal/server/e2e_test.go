@@ -258,6 +258,24 @@ func decodeSSEEnvelope(p pubsub.Payload) (any, bool) {
 			return nil, false
 		}
 		return e, true
+	case pubsub.PayloadTypeTaskEvent:
+		var e pubsub.Event[proto.AgentTaskEvent]
+		if err := json.Unmarshal(p.Payload, &e); err != nil {
+			return nil, false
+		}
+		return e, true
+	case pubsub.PayloadTypeTaskQuestionRequest:
+		var e pubsub.Event[proto.TaskQuestion]
+		if err := json.Unmarshal(p.Payload, &e); err != nil {
+			return nil, false
+		}
+		return e, true
+	case pubsub.PayloadTypeTaskQuestionNotification:
+		var e pubsub.Event[proto.TaskQuestionNotification]
+		if err := json.Unmarshal(p.Payload, &e); err != nil {
+			return nil, false
+		}
+		return e, true
 	}
 	return nil, false
 }
