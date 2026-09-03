@@ -440,12 +440,19 @@ func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Works
 		skills.WithWorkingDir(discoveryCfg.WorkingDir),
 	)
 
-	appWorkspace, err := app.New(b.ctx, conn, cfg, skillsMgr)
+	// Derive the workspace run context before app.New so the app (and
+	// the task manager it wires) binds its background-task lifetime to
+	// the workspace, not to the backend. Every path from here either
+	// installs wsCancel on the Workspace (whose Shutdown invokes it) or
+	// cancels it inline.
+	wsCtx, wsCancel := context.WithCancel(b.ctx)
+
+	appWorkspace, err := app.New(wsCtx, conn, cfg, skillsMgr)
 	if err != nil {
+		wsCancel()
 		return nil, proto.Workspace{}, fmt.Errorf("failed to create app workspace: %w", err)
 	}
 
-	wsCtx, wsCancel := context.WithCancel(b.ctx)
 	ws := &Workspace{
 		App:          appWorkspace,
 		ID:           id,

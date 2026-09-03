@@ -2,10 +2,14 @@ package app
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/task"
+	"github.com/charmbracelet/crush/internal/agent/taskquestion"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
@@ -37,7 +41,21 @@ func NewForTest(ctx context.Context) *App {
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
 		runCompletions:     pubsub.NewBroker[notify.RunComplete](),
+		taskEvents:         pubsub.NewBroker[task.Event](),
 	}
+	// A task manager over the in-memory store and the in-memory
+	// task-question service give test apps the same task transport
+	// surface production wires: lifecycle events bridge onto
+	// taskEvents and terminal events drain the durable outbox (no
+	// inbox is wired here), while both brokers fan into the shared
+	// events stream exactly like [App.setupEvents].
+	app.taskManager = task.New(ctx, task.Config{
+		WorkspaceID: "test",
+		Store:       task.NewMemoryStore(),
+	})
+	app.taskManager.Subscribe(app.handleTaskEvent)
+	app.taskOutbox = task.NewOutboxNotifier(app.taskManager, app.taskEvents)
+	app.taskQuestions = taskquestion.NewService(taskquestion.Config{})
 
 	eventsCtx, cancel := context.WithCancel(ctx)
 	app.eventsCtx = eventsCtx
@@ -53,6 +71,16 @@ func NewForTest(ctx context.Context) *App {
 		app.agentNotifications.Subscribe)
 	app.subscribe(eventsCtx, "run-completions",
 		app.runCompletions.Subscribe)
+	app.subscribeMustDeliver(eventsCtx, "task-events",
+		app.taskEvents.Subscribe)
+	app.subscribeMustDeliver(eventsCtx, "taskquestion-batches",
+		app.taskQuestions.Subscribe)
+	app.subscribeMustDeliver(eventsCtx, "taskquestion-notifications",
+		app.taskQuestions.SubscribeNotifications)
+	// The parent-idle inbox watcher rides the same lifetime as the
+	// fan-in above. No taskInbox is wired here, so it stays a no-op
+	// until a test injects one onto app.taskInbox.
+	app.watchParentIdle()
 	app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
 		cancel()
 		app.serviceEventsWG.Wait()
@@ -62,13 +90,28 @@ func NewForTest(ctx context.Context) *App {
 	return app
 }
 
-// ShutdownForTest tears down the App's event broker and fan-in
-// goroutines. It is safe to call multiple times.
+// ShutdownForTest tears down the App's task pipeline, event broker,
+// and fan-in goroutines. It is safe to call multiple times.
 //
 // Use this in tests instead of [App.Shutdown], which drives a full
 // production shutdown path (database release, LSP teardown, MCP
 // shutdown) that synthetic test apps cannot satisfy.
 func (app *App) ShutdownForTest() {
+	// Mirror the production teardown order from [App.Shutdown]:
+	// interrupt pending task questions, then settle the task manager,
+	// so cancellation and terminalization events still reach the event
+	// brokers before the cleanup funcs below cancel the fan-in and shut
+	// the brokers down.
+	if app.taskQuestions != nil {
+		app.taskQuestions.Shutdown()
+	}
+	if app.taskManager != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := app.taskManager.Shutdown(shutdownCtx); err != nil {
+			slog.Error("Task manager shutdown did not settle all tasks", "error", err)
+		}
+	}
 	for _, cleanup := range app.cleanupFuncs {
 		if cleanup != nil {
 			_ = cleanup(context.Background())

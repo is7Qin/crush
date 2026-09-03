@@ -19,6 +19,8 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/task"
+	"github.com/charmbracelet/crush/internal/agent/taskquestion"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
@@ -62,6 +64,26 @@ type App struct {
 
 	AgentCoordinator agent.Coordinator
 
+	// taskManager owns durable call_agent task lifecycle for this
+	// workspace. Its background-task lifetime is bound to globalCtx, not
+	// to any single tool request, so a background child survives the turn
+	// that started it.
+	taskManager *task.Manager
+	// taskQuestions is the task-correlated question transport for
+	// child runs, wired to the durable TaskQuestionLifecycle bridge:
+	// question and task state commit together around every wait,
+	// answer, cancellation, timeout, and interruption.
+	taskQuestions taskquestion.TaskQuestionService
+	// taskOutbox replays durable terminal task records onto taskEvents
+	// and acks them, so completions missed by dropped pub/sub or SSE
+	// delivery stay queryable until consumed.
+	taskOutbox *task.OutboxNotifier
+	// taskInbox drains the durable parent completion reports into
+	// owner sessions as untrusted result messages. Delivery is
+	// serialized per parent and skipped while a parent is busy or
+	// gone, so it never starts a re-entrant run.
+	taskInbox *task.InboxDrainer
+
 	LSPManager *lsp.Manager
 
 	Skills *skills.Manager
@@ -77,6 +99,11 @@ type App struct {
 	globalCtx          context.Context
 	cleanupFuncs       []func(context.Context) error
 	agentNotifications *pubsub.Broker[notify.Notification]
+	// taskEvents carries call_agent task lifecycle events (created,
+	// started, terminal states) from the task manager into the app event
+	// stream. The durable task row remains the source of truth; these are
+	// wake-up hints.
+	taskEvents *pubsub.Broker[task.Event]
 	// runCompletions is the authoritative per-run completion signal,
 	// emitted once per top-level agent turn after all message
 	// updates have been flushed. Bridged into app.events so SSE
@@ -124,10 +151,93 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		serviceEventsWG:    &sync.WaitGroup{},
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
+		taskEvents:         pubsub.NewBroker[task.Event](),
 		runCompletions:     pubsub.NewBroker[notify.RunComplete](),
 	}
 
+	// Durable agent-task core backing call_agent. The manager's task
+	// lifetime is bound to the workspace context, so background children
+	// survive the parent turn that dispatched them and are settled by
+	// Shutdown before the shared DB connection is released. Lifecycle
+	// events are bridged onto taskEvents (a wake-up hint; the task row is
+	// the source of truth).
+	app.taskManager = task.New(ctx, task.Config{
+		WorkspaceID: store.WorkingDir(),
+		Store:       task.NewSQLiteStore(conn),
+	})
+	// Startup recovery before anything can observe or start tasks:
+	// every task left pending, running, or waiting by a previous
+	// process is force-terminalized as interrupted with its durable
+	// delivery in one transaction. No provider turn is replayed and
+	// undelivered child mailbox messages stay queued.
+	if recovered, err := app.taskManager.RecoverLiveTasks(ctx); err != nil {
+		slog.Error("Failed to recover live call_agent tasks", "error", err)
+	} else if len(recovered) > 0 {
+		slog.Info("Recovered interrupted call_agent tasks", "count", len(recovered))
+	}
+	app.taskOutbox = task.NewOutboxNotifier(app.taskManager, app.taskEvents)
+	// Parent inbox delivery: untrusted result messages land through
+	// the message service, and the gate refuses to touch parents that
+	// were deleted or are mid-run.
+	app.taskInbox = task.NewInboxDrainer(
+		app.taskManager.Store(),
+		taskParentGate{sessions: sessions, app: app},
+		taskResultWriter{messages: messages},
+	)
+	// Bridge lifecycle events onto the task event stream and drain the
+	// owner's durable mailbox on every terminalization. Registered
+	// after both drainers exist; nothing can terminalize a task until
+	// the coordinator runs, which is later than here. The startup
+	// replay of recovered records waits until the event fan-in is
+	// installed below.
+	app.taskManager.Subscribe(app.handleTaskEvent)
+
+	// Task-correlated question transport for call_agent children.
+	// The production service runs on the App-owned
+	// TaskQuestionLifecycle bridge, not in-memory callbacks:
+	// BeginWait commits the pending question together with the
+	// task's waiting_for_input transition before the batch is
+	// published, and Resolve commits the resolution together with
+	// the matching task transition before any runner wakes. The
+	// durable repo stays wired for owner-scoped resync reads and
+	// the startup pending sweep.
+	app.taskQuestions = taskquestion.NewService(taskquestion.Config{
+		Repo:      taskquestion.NewSQLiteRepository(conn),
+		Lifecycle: newTaskQuestionLifecycle(app.taskManager),
+	})
+	// Durable question-mirror recovery: this process tracks no
+	// waiters, so pending rows left by an earlier process can never
+	// be answered and resolve as interrupted.
+	if n, err := app.taskQuestions.InterruptStale(ctx); err != nil {
+		slog.Error("Failed to interrupt stale task questions", "error", err)
+	} else if n > 0 {
+		slog.Info("Interrupted stale task questions", "count", n)
+	}
+
 	app.setupEvents()
+	// Startup outbox replay, only after the event fan-in is installed:
+	// Drain republishes each durable record onto taskEvents via
+	// PublishMustDeliver and then acks it, and the broker drops
+	// must-deliver events that no subscriber channel accepted.
+	// Draining before setupEvents would therefore ack recovered
+	// records into a void and erase them from the resync replay set.
+	// setupSubscriber installs each subscription synchronously, so
+	// once setupEvents returns the task-events bridge is live and
+	// every republished record is observable through App.Events before
+	// its ack. Task rows remain the queryable source of truth for
+	// consumers that attach after this point.
+	if err := app.taskOutbox.Drain(ctx, ""); err != nil {
+		slog.Warn("Failed to drain recovered task outbox", "error", err)
+	}
+	if n, err := app.taskInbox.Drain(ctx, ""); err != nil {
+		slog.Warn("Failed to drain recovered task inbox", "error", err)
+	} else if n > 0 {
+		slog.Info("Delivered recovered task results", "count", n)
+	}
+	// Re-attempt each parent's inbox drain when its run completes, so
+	// reports held by the busy-parent gate are delivered the moment the
+	// parent goes idle.
+	app.watchParentIdle()
 
 	// Initialize clipboard support. This is best-effort; if it fails
 	// (e.g., headless environment), clipboard operations will return nil.
@@ -212,6 +322,42 @@ func (app *App) SendEvent(msg tea.Msg) {
 // AgentNotifications returns the broker for agent notification events.
 func (app *App) AgentNotifications() *pubsub.Broker[notify.Notification] {
 	return app.agentNotifications
+}
+
+// TaskOutbox returns the durable task outbox: the manager-side
+// list/ack API plus the notification adapter that replays undelivered
+// terminal records onto the task event broker. The app drives it in
+// production: startup replays and acks rows left by a previous
+// process, and every terminal task event acks the owner's
+// superseded rows while retaining the triggering record for resync
+// (see handleTaskEvent). This accessor remains for owner-scoped
+// resync and inspection.
+func (app *App) TaskOutbox() *task.OutboxNotifier {
+	return app.taskOutbox
+}
+
+// TaskInbox returns the durable parent inbox drainer: the
+// owner-scoped list/ack resync primitive that delivers each parent's
+// retained completion reports. Drain is serialized per parent,
+// skips busy or deleted parents (their rows stay retained), and
+// acks a row only after its result message commits.
+func (app *App) TaskInbox() *task.InboxDrainer {
+	return app.taskInbox
+}
+
+// Tasks returns the durable call_agent task manager: the owner-scoped
+// list/status/output/cancel/message control plane backing the REST
+// task routes and local workspaces. Task rows are the source of
+// truth; task events are wake-up hints only.
+func (app *App) Tasks() *task.Manager {
+	return app.taskManager
+}
+
+// TaskQuestions returns the task-correlated question transport: the
+// owner-authorized answer/cancel/pending surface backing the REST
+// task-question routes and local workspaces.
+func (app *App) TaskQuestions() taskquestion.TaskQuestionService {
+	return app.taskQuestions
 }
 
 // RunCompletions returns the broker for the authoritative per-run
@@ -589,6 +735,7 @@ func (app *App) setupEvents() {
 	ctx, cancel := context.WithCancel(app.globalCtx)
 	app.eventsCtx = ctx
 	app.subscribe(ctx, "sessions", app.Sessions.Subscribe)
+
 	app.subscribe(ctx, "messages", app.Messages.Subscribe)
 	app.subscribeMustDeliver(ctx, "permissions", app.Permissions.Subscribe)
 	app.subscribeMustDeliver(ctx, "permissions-notifications", app.Permissions.SubscribeNotifications)
@@ -597,6 +744,14 @@ func (app *App) setupEvents() {
 	app.subscribe(ctx, "history", app.History.Subscribe)
 	app.subscribe(ctx, "agent-notifications", app.agentNotifications.Subscribe)
 	app.subscribeMustDeliver(ctx, "run-completions", app.runCompletions.Subscribe)
+	app.subscribeMustDeliver(ctx, "task-events", app.taskEvents.Subscribe)
+	// Child question batches and their resolutions ride the same
+	// fan-in as primary questions. The payloads are
+	// task-correlated records (question id, task id, child session,
+	// run generation), so transports keep them distinct from the
+	// global single-slot question flow.
+	app.subscribeMustDeliver(ctx, "taskquestion-batches", app.taskQuestions.Subscribe)
+	app.subscribeMustDeliver(ctx, "taskquestion-notifications", app.taskQuestions.SubscribeNotifications)
 	app.subscribe(ctx, "mcp", mcp.SubscribeEvents)
 	app.subscribe(ctx, "lsp", SubscribeLSPEvents)
 	if app.Skills != nil {
@@ -621,8 +776,11 @@ func (app *App) subscribe[T any](
 	name string,
 	subscriber func(context.Context) <-chan pubsub.Event[T],
 ) {
+	// Install the upstream subscription synchronously before
+	// returning (see subscribeMustDeliver): only the forwarding loop
+	// runs in the background.
+	subCh := subscriber(ctx)
 	app.serviceEventsWG.Go(func() {
-		subCh := subscriber(ctx)
 		for {
 			select {
 			case event, ok := <-subCh:
@@ -651,8 +809,13 @@ func (app *App) subscribeMustDeliver[T any](
 	name string,
 	subscriber func(context.Context) <-chan pubsub.Event[T],
 ) {
+	// Install the upstream subscription synchronously before
+	// returning — broker.Subscribe only registers a buffered channel
+	// and never blocks — so a caller that publishes right after
+	// setupEvents is guaranteed to have this fan-in attached as a
+	// consumer. Only the forwarding loop runs in the background.
+	subCh := subscriber(ctx)
 	app.serviceEventsWG.Go(func() {
-		subCh := subscriber(ctx)
 		for {
 			select {
 			case event, ok := <-subCh:
@@ -686,18 +849,20 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 	}
 	var err error
 	app.AgentCoordinator, err = agent.NewCoordinator(ctx, agent.CoordinatorOptions{
-		Config:      app.config,
-		Sessions:    app.Sessions,
-		Messages:    app.Messages,
-		Permissions: app.Permissions,
-		Questions:   app.Questions,
-		History:     app.History,
-		FileTracker: app.FileTracker,
-		LSPManager:  app.LSPManager,
-		Notify:      app.agentNotifications,
-		RunComplete: app.runCompletions,
-		Skills:      app.Skills,
-		Interactive: interactive,
+		Config:        app.config,
+		Sessions:      app.Sessions,
+		Messages:      app.Messages,
+		Permissions:   app.Permissions,
+		Questions:     app.Questions,
+		History:       app.History,
+		FileTracker:   app.FileTracker,
+		LSPManager:    app.LSPManager,
+		Notify:        app.agentNotifications,
+		RunComplete:   app.runCompletions,
+		Skills:        app.Skills,
+		Interactive:   interactive,
+		Tasks:         app.taskManager,
+		TaskQuestions: app.taskQuestions,
 	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
@@ -753,6 +918,25 @@ func (app *App) Shutdown() {
 	// Shared shutdown context for all timeout-bounded cleanup.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// Settle call_agent tasks before the parallel cleanup below can
+	// release the shared DB connection: cancellation and terminalization
+	// write to agent_tasks and to child sessions, so they must land while
+	// the connection is still open. Shutdown cancels every live runner,
+	// waits until the bounded context expires, and force-terminalizes the
+	// rest as interrupted. This runs before the message drain so the child
+	// turns' debounced deltas are included in it.
+	// Interrupt pending task questions first so child runners blocked
+	// in AskTask wake up and settle before the task manager cancels and
+	// waits for them.
+	if app.taskQuestions != nil {
+		app.taskQuestions.Shutdown()
+	}
+	if app.taskManager != nil {
+		if err := app.taskManager.Shutdown(shutdownCtx); err != nil {
+			slog.Error("Task manager shutdown did not settle all tasks", "error", err)
+		}
+	}
 
 	// Drain any debounced message updates before the DB-close cleanup
 	// runs in the parallel block below. message.Service buffers

@@ -31,9 +31,9 @@ func TestSetupSubscriber_NormalFlow(t *testing.T) {
 	app := &App{serviceEventsWG: &wg, events: out}
 	app.subscribe(ctx, "test", src.Subscribe)
 
-	// Yield so the subscriber goroutine can call src.Subscribe before we publish.
-	time.Sleep(10 * time.Millisecond)
-
+	// No yield needed: subscribe installs the subscription
+	// synchronously, so publishing right after it returns is
+	// guaranteed to have the fan-in attached.
 	src.Publish(pubsub.CreatedEvent, "hello")
 	src.Publish(pubsub.CreatedEvent, "world")
 
@@ -43,6 +43,82 @@ func TestSetupSubscriber_NormalFlow(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("timed out waiting for forwarded event")
 		}
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// TestSubscribe_InstallationIsSynchronous pins the startup-replay
+// ordering: the app drains the durable task outbox immediately after
+// setupEvents returns, so the fan-in subscriptions that bridge service
+// brokers onto the shared events broker must already be installed when
+// those helpers return. If installation regressed to asynchronous, a
+// publish racing the subscription goroutine would be lost, and the
+// outbox drain would acknowledge records that no consumer ever saw.
+func TestSubscribe_InstallationIsSynchronous(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	src := pubsub.NewBroker[string]()
+	defer src.Shutdown()
+	out := pubsub.NewBroker[tea.Msg]()
+	defer out.Shutdown()
+
+	var wg sync.WaitGroup
+	app := &App{serviceEventsWG: &wg, events: out}
+	app.subscribe(ctx, "sync", src.Subscribe)
+	require.Equal(t, 1, src.GetSubscriberCount(),
+		"subscribe must install the subscription before returning")
+
+	outCh := out.Subscribe(ctx)
+	src.Publish(pubsub.CreatedEvent, "hello")
+	select {
+	case ev := <-outCh:
+		require.Equal(t, tea.Msg(pubsub.Event[string]{
+			Type:    pubsub.CreatedEvent,
+			Payload: "hello",
+		}), ev.Payload)
+	case <-time.After(5 * time.Second):
+		t.Fatal("event published right after subscribe was never forwarded")
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// TestSubscribeMustDeliver_InstallationIsSynchronous pins the
+// same invariant for the bounded-blocking variant used by the task
+// event fan-in.
+func TestSubscribeMustDeliver_InstallationIsSynchronous(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	src := pubsub.NewBroker[string]()
+	defer src.Shutdown()
+	out := pubsub.NewBroker[tea.Msg]()
+	defer out.Shutdown()
+
+	var wg sync.WaitGroup
+	app := &App{serviceEventsWG: &wg, events: out}
+	app.subscribeMustDeliver(ctx, "sync", src.Subscribe)
+	require.Equal(t, 1, src.GetSubscriberCount(),
+		"subscribeMustDeliver must install the subscription before returning")
+
+	outCh := out.Subscribe(ctx)
+	src.PublishMustDeliver(ctx, pubsub.CreatedEvent, "hello")
+	select {
+	case ev := <-outCh:
+		require.Equal(t, tea.Msg(pubsub.Event[string]{
+			Type:    pubsub.CreatedEvent,
+			Payload: "hello",
+		}), ev.Payload)
+	case <-time.After(5 * time.Second):
+		t.Fatal("event published right after subscribeMustDeliver was never forwarded")
 	}
 
 	cancel()
