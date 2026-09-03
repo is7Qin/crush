@@ -31,9 +31,12 @@ type Workspace struct {
 	Skills []SkillState `json:"skills,omitempty"`
 }
 
-// Error represents an error response.
+// Error represents an error response. Code is the stable,
+// machine-matchable error name (e.g. task_owner_forbidden); it is
+// empty on legacy error bodies.
 type Error struct {
 	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
 }
 
 // ConfigChanged is published whenever the workspace's configuration is

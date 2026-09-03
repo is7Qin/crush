@@ -79,10 +79,26 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 		}
 	}
 
-	// Validate hooks after all config merging is complete so workspace
-	// hooks also get their matcher regexes compiled.
+	// Validate hooks after all config merging is complete so
+	// workspace hooks also get their matcher regexes compiled.
 	if err := cfg.ValidateHooks(); err != nil {
 		return nil, fmt.Errorf("invalid hook configuration: %w", err)
+	}
+
+	// Migrate legacy permission tool names after all merging, before
+	// anything consumes the allow or deny list.
+	cfg.NormalizePermissionToolNames()
+
+	// Normalize and validate agent profiles after merging so an invalid
+	// profile fails the load with typed diagnostics instead of being
+	// silently ignored.
+	profiles, err := NormalizeAgentProfileKeys(cfg.AgentProfiles)
+	if err != nil {
+		return nil, fmt.Errorf("invalid agent profile configuration: %w", err)
+	}
+	cfg.AgentProfiles = profiles
+	if err := ValidateAgentProfiles(cfg.AgentProfiles); err != nil {
+		return nil, fmt.Errorf("invalid agent profile configuration: %w", err)
 	}
 
 	if !isInsideWorktree() {
@@ -551,6 +567,10 @@ func (c *Config) NormalizeOptions() {
 
 func (c *Config) setDefaults(workingDir, dataDir string) {
 	c.NormalizeOptions()
+	if c.ProfileGeneration == 0 {
+		// First snapshot of this config lineage; reloads bump it.
+		c.ProfileGeneration = 1
+	}
 	if len(c.Options.GlobalContextPaths) == 0 {
 		crushConfigDir := filepath.Dir(GlobalConfig())
 		c.Options.GlobalContextPaths = []string{

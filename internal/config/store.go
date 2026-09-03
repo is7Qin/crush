@@ -1211,6 +1211,10 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 		return fmt.Errorf("invalid hook configuration on reload: %w", err)
 	}
 
+	// Migrate legacy permission tool names on every merged reload,
+	// mirroring Load.
+	cfg.NormalizePermissionToolNames()
+
 	// Save current state for potential rollback BEFORE configureProviders,
 	// which may write to disk via RemoveConfigField (e.g. removing stale
 	// OAuth providers). Capturing after would snapshot a config that has
@@ -1253,6 +1257,9 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 	}
 
 	// Update store state BEFORE running model/agent setup (so they see new config)
+	if oldConfig != nil {
+		cfg.ProfileGeneration = oldConfig.ProfileGeneration + 1
+	}
 	s.setConfig(cfg)
 	s.loadedPaths = loadedPaths
 	s.resolver = resolver

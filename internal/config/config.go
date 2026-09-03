@@ -761,6 +761,20 @@ type Config struct {
 	Env map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set on startup"`
 
 	Agents map[string]Agent `json:"-"`
+
+	// AgentProfiles is the user-authored profile source, decoded from the
+	// "agents" config key. The Agents map above is derived state rebuilt by
+	// SetupAgents from built-ins plus these patches, so serializing a
+	// runtime config never writes generated defaults back into user files.
+	AgentProfiles map[string]AgentProfilePatch `json:"agents,omitempty" jsonschema:"description=Agent profile overrides keyed by profile name"`
+
+	// ProfileGeneration numbers this config snapshot for profile
+	// resolution: it starts at 1 for a fresh load and increments once
+	// per committed config reload. ResolvedProfile carries it so a
+	// delegation records which snapshot its policy came from, and an
+	// in-flight task keeps the generation captured at its start.
+	// Runtime-only: never serialized into user config.
+	ProfileGeneration uint64 `json:"-"`
 }
 
 // cloneForWrite returns a copy of c that the store's typed field mutators
@@ -882,7 +896,12 @@ const maxRecentModelsPerType = 5
 
 func allToolNames() []string {
 	return []string{
-		"agent",
+		DelegationToolName,
+		"agent_status",
+		"agent_output",
+		"agent_list",
+		"agent_cancel",
+		"agent_message",
 		"bash",
 		"crush_info",
 		"crush_logs",
@@ -964,6 +983,26 @@ func (c *Config) SetupAgents() {
 			AllowedMCP: map[string][]string{},
 		},
 	}
+
+	// Apply user profile patches over the built-ins. Profiles for names
+	// other than the built-ins stay in AgentProfiles for the later profile
+	// resolver; they must not leak into the runtime map while the
+	// coordinator only knows built-in agents.
+	for _, key := range slices.Sorted(maps.Keys(c.AgentProfiles)) {
+		patch := c.AgentProfiles[key]
+		agent, ok := agents[asciiLower(key)]
+		if !ok {
+			continue
+		}
+		agents[asciiLower(key)] = applyProfilePatch(agent, allowedTools, patch)
+	}
+
+	// Children never delegate: the delegation tool is denied for the task
+	// profile regardless of what its patch requested.
+	task := agents[AgentTask]
+	task.AllowedTools = filterSlice(task.AllowedTools, []string{DelegationToolName}, false)
+	agents[AgentTask] = task
+
 	c.Agents = agents
 }
 
