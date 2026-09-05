@@ -146,10 +146,7 @@ func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			return usage(stderr, fmt.Sprintf("option: %s requires a value", key))
 		}
 		n, err := strconv.Atoi(val)
-		if err != nil {
-			return usage(stderr, fmt.Sprintf("option: %s expects a number of seconds, got %q", key, val))
-		}
-		if key == "max-retries" && n < 0 {
+		if err != nil || n < 0 {
 			return usage(stderr, fmt.Sprintf("option: %s expects a non-negative integer, got %q", key, val))
 		}
 		o[spec.jsonKey] = n
@@ -213,9 +210,14 @@ var optionSpecs = map[string]optionSpec{
 	"data-directory": {jsonKey: "data_directory", kind: optString},
 	"initialize-as":  {jsonKey: "initialize_as", kind: optString},
 
-	// Integer fields.
-	"request-timeout": {jsonKey: "request_timeout", kind: optInt},
-	"max-retries":     {jsonKey: "max_retries", kind: optInt},
+	// Integer fields. 0 means "unset": the task manager treats live
+	// quotas of 0 as unlimited and falls back to its default model
+	// capacity.
+	"request-timeout":          {jsonKey: "request_timeout", kind: optInt},
+	"max-retries":              {jsonKey: "max_retries", kind: optInt},
+	"live-tasks-per-parent":    {jsonKey: "live_tasks_per_parent", kind: optInt},
+	"live-tasks-per-workspace": {jsonKey: "live_tasks_per_workspace", kind: optInt},
+	"running-tasks-per-model":  {jsonKey: "running_tasks_per_model", kind: optInt},
 
 	// List fields. Keys are singular because each call appends one value.
 	"context-path":        {jsonKey: "context_paths", kind: optList},

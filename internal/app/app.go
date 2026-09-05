@@ -117,6 +117,19 @@ type App struct {
 	herdrClient *herdr.Client
 }
 
+// taskLimits maps configured options onto task manager limits. Live
+// quotas pass through as-is (non-positive means unlimited); the
+// per-model cap is defaulted by the config layer so production
+// wiring always selects a bounded capacity.
+func taskLimits(o *config.Options) task.Limits {
+	limits := task.Limits{RunningPerModel: o.RunningTasksPerModelOrDefault()}
+	if o != nil {
+		limits.LiveTasksPerParent = o.LiveTasksPerParent
+		limits.LiveTasksPerWorkspace = o.LiveTasksPerWorkspace
+	}
+	return limits
+}
+
 // New initializes a new application instance. skillsMgr carries the
 // per-workspace skill discovery results computed by the caller; the
 // caller is responsible for constructing it (typically via
@@ -163,6 +176,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	// the source of truth).
 	app.taskManager = task.New(ctx, task.Config{
 		WorkspaceID: store.WorkingDir(),
+		Limits:      taskLimits(cfg.Options),
 		Store:       task.NewSQLiteStore(conn),
 	})
 	// Startup recovery before anything can observe or start tasks:
@@ -591,6 +605,17 @@ func (app *App) UpdateAgentModel(ctx context.Context) error {
 		return fmt.Errorf("agent configuration is missing")
 	}
 	return app.AgentCoordinator.UpdateModels(ctx)
+}
+
+// SetPrimaryAgent switches the runtime primary agent to the named
+// profile. The change is in-memory only (never persisted to config),
+// leaves the current session untouched, and keeps the existing agent
+// active when resolution or construction fails.
+func (app *App) SetPrimaryAgent(ctx context.Context, profile string) error {
+	if app.AgentCoordinator == nil {
+		return fmt.Errorf("agent configuration is missing")
+	}
+	return app.AgentCoordinator.SetPrimaryAgent(ctx, profile)
 }
 
 // restoreModelFromSession reads the last assistant message in the

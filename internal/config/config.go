@@ -380,14 +380,14 @@ type Options struct {
 	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	Notifications             string       `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
-	LiveTasksPerParent    int `json:"live_tasks_per_parent,omitempty" jsonschema:"description=Maximum number of live child tasks per parent session. 0 or unset means unlimited.,default=0"`
-	LiveTasksPerWorkspace int `json:"live_tasks_per_workspace,omitempty" jsonschema:"description=Maximum number of live child tasks per workspace. 0 or unset means unlimited.,default=0"`
+	LiveTasksPerParent        int          `json:"live_tasks_per_parent,omitempty" jsonschema:"description=Maximum number of live child tasks per parent session. 0 or unset means unlimited.,default=0"`
+	LiveTasksPerWorkspace     int          `json:"live_tasks_per_workspace,omitempty" jsonschema:"description=Maximum number of live child tasks per workspace. 0 or unset means unlimited.,default=0"`
 	// RunningTasksPerModel caps concurrently running child tasks per
 	// provider model. Unlike the live quotas it is never unlimited: an
 	// unset or non-positive value falls back to
 	// DefaultRunningTasksPerModel.
 	RunningTasksPerModel *int `json:"running_tasks_per_model,omitempty" jsonschema:"description=Maximum number of child tasks running concurrently per provider model. Unset or non-positive falls back to 10.,default=10"`
-	RequestTimeout            *int         `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
+	RequestTimeout       *int `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
 }
 
 // DefaultRequestTimeout bounds each LLM API request when the user has not
@@ -410,6 +410,8 @@ func (o *Options) GetRequestTimeout() time.Duration {
 		return 0
 	}
 	return time.Duration(*o.RequestTimeout) * time.Second
+}
+
 // DefaultRunningTasksPerModel is the per-model child-task concurrency
 // cap applied when the option is unset or non-positive. Keep it in
 // sync with task.DefaultRunningPerModel, the task package's own

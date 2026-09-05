@@ -220,13 +220,17 @@ func TestOption_Int(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "crushrc")
-	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(`option max-retries 0`))
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(`option live-tasks-per-parent 3
+option running-tasks-per-model 10
+option max-retries 0`))
 	require.NoError(t, err)
 
 	var result map[string]any
 	require.NoError(t, json.Unmarshal(jsonBytes, &result))
 
 	opts := result["options"].(map[string]any)
+	require.EqualValues(t, 3, opts["live_tasks_per_parent"])
+	require.EqualValues(t, 10, opts["running_tasks_per_model"])
 	require.EqualValues(t, 0, opts["max_retries"])
 }
 
