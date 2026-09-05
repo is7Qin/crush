@@ -70,6 +70,22 @@ func TestValidateAgentProfiles(t *testing.T) {
 			name: "explicit empty system_prompt is a valid clear",
 			json: `{"coder":{"system_prompt":""}}`,
 		},
+		{
+			name: "all supported reasoning_effort values pass",
+			json: `{"a":{"reasoning_effort":"minimal"},"b":{"reasoning_effort":"low"},
+			      "c":{"reasoning_effort":"medium"},"d":{"reasoning_effort":"high"},
+			      "e":{"reasoning_effort":"xhigh"},"f":{"reasoning_effort":"max"}}`,
+		},
+		{
+			name:    "unsupported reasoning_effort is rejected",
+			json:    `{"coder":{"reasoning_effort":"turbo"}}`,
+			wantErr: `reasoning_effort must be one of minimal, low, medium, high, xhigh, max, got "turbo"`,
+		},
+		{
+			name:    "empty reasoning_effort is rejected",
+			json:    `{"coder":{"reasoning_effort":""}}`,
+			wantErr: "reasoning_effort must be one of",
+		},
 	}
 
 	for _, tt := range tests {

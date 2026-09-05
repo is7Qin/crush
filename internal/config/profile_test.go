@@ -40,15 +40,16 @@ func TestOptional_PresenceSemantics(t *testing.T) {
 	})
 
 	t.Run("present value is decoded", func(t *testing.T) {
-		p := decodePatch(t, `{"model":"openai/gpt-4o","max_steps":12,"disabled":true,"max_duration":90000000000}`)
+		p := decodePatch(t, `{"model":"openai/gpt-4o","reasoning_effort":"xhigh","max_steps":12,"disabled":true,"max_duration":90000000000}`)
 		assert.Equal(t, Some("openai/gpt-4o"), p.Model)
+		assert.Equal(t, Some("xhigh"), p.ReasoningEffort)
 		assert.Equal(t, Some(12), p.MaxSteps)
 		assert.Equal(t, Some(true), p.Disabled)
 		assert.Equal(t, Some(90*time.Second), p.MaxDuration)
 	})
 
 	t.Run("null is rejected for every field", func(t *testing.T) {
-		for _, field := range []string{"model", "models", "allowed_tools", "disabled", "max_steps"} {
+		for _, field := range []string{"model", "models", "reasoning_effort", "allowed_tools", "disabled", "max_steps"} {
 			var p AgentProfilePatch
 			err := json.Unmarshal([]byte(`{"`+field+`":null}`), &p)
 			require.Error(t, err, "field %s", field)
@@ -61,14 +62,15 @@ func TestAgentProfilePatch_MarshalRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	in := AgentProfilePatch{
-		Model:        Some("openai/gpt-4o"),
-		AllowedTools: Some([]string{}),
-		MaxSteps:     Some(5),
+		Model:           Some("openai/gpt-4o"),
+		ReasoningEffort: Some("high"),
+		AllowedTools:    Some([]string{}),
+		MaxSteps:        Some(5),
 	}
 
 	data, err := json.Marshal(in)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"model":"openai/gpt-4o","allowed_tools":[],"max_steps":5}`, string(data))
+	assert.JSONEq(t, `{"model":"openai/gpt-4o","reasoning_effort":"high","allowed_tools":[],"max_steps":5}`, string(data))
 
 	var out AgentProfilePatch
 	require.NoError(t, json.Unmarshal(data, &out))
@@ -87,16 +89,17 @@ func TestMergeAgentProfilePatches(t *testing.T) {
 		},
 	}
 	global := map[string]AgentProfilePatch{
-		"coder": {Description: Some("global desc")},
+		"coder": {Description: Some("global desc"), ReasoningEffort: Some("medium")},
 		"reviewer": {
 			Description: Some("reviews code"),
 		},
 	}
 	project := map[string]AgentProfilePatch{
 		"coder": {
-			Description:  Some("project desc"),
-			AllowedTools: Some([]string{"view"}), // replaces, never appends
-			ContextPaths: Some([]string{}),       // explicit empty clears
+			Description:     Some("project desc"),
+			AllowedTools:    Some([]string{"view"}), // replaces, never appends
+			ContextPaths:    Some([]string{}),       // explicit empty clears
+			ReasoningEffort: Some("max"),            // higher layer overrides
 		},
 	}
 
@@ -105,11 +108,20 @@ func TestMergeAgentProfilePatches(t *testing.T) {
 	coder := merged["coder"]
 	assert.Equal(t, Some("Coder"), coder.Name, "absent higher-priority fields inherit")
 	assert.Equal(t, Some("project desc"), coder.Description, "highest layer wins")
+	assert.Equal(t, Some("max"), coder.ReasoningEffort, "highest present layer wins the effort")
 	assert.Equal(t, Some([]string{"view"}), coder.AllowedTools, "lists replace")
 	require.True(t, coder.ContextPaths.Present)
 	assert.Empty(t, coder.ContextPaths.Value, "explicit empty clears the inherited list")
 
 	assert.Contains(t, merged, "reviewer", "new profile keys are retained")
+
+	// An omitted effort inherits the lower layer's value instead of
+	// being materialized as an explicit empty.
+	inherit := MergeAgentProfilePatches(
+		map[string]AgentProfilePatch{"coder": {ReasoningEffort: Some("low")}},
+		map[string]AgentProfilePatch{"coder": {Description: Some("d")}},
+	)
+	assert.Equal(t, Some("low"), inherit["coder"].ReasoningEffort, "omitted effort inherits")
 }
 
 func TestSetupAgents_AppliesProfilePatches(t *testing.T) {

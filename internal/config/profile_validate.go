@@ -34,6 +34,13 @@ func NormalizeAgentProfileKeys(profiles map[string]AgentProfilePatch) (map[strin
 	return normalized, nil
 }
 
+// profileReasoningEfforts is the deterministic allow-list of profile
+// reasoning strengths, matching the OMO vocabulary. Per-model support is
+// enforced later at call time: effectiveReasoningEffort ignores a level the
+// model does not list and falls back to the model default, so a valid
+// strength is never silently sent to a model that cannot consume it.
+var profileReasoningEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
 // ValidateAgentProfiles rejects malformed profile data with diagnostics that
 // name the profile key and field. It does not check model availability; the
 // resolver does that against the live provider catalog.
@@ -68,6 +75,10 @@ func ValidateAgentProfiles(profiles map[string]AgentProfilePatch) error {
 			if err := validateModelRefs(key, "models", p.Models.Value); err != nil {
 				errs = append(errs, err)
 			}
+		}
+		if p.ReasoningEffort.Present && !slices.Contains(profileReasoningEfforts, p.ReasoningEffort.Value) {
+			errs = append(errs, fmt.Errorf("agent profile %q: reasoning_effort must be one of %s, got %q",
+				key, strings.Join(profileReasoningEfforts, ", "), p.ReasoningEffort.Value))
 		}
 		if p.SystemPrompt.Present && p.PromptFile.Present {
 			errs = append(errs, fmt.Errorf("agent profile %q: system_prompt and prompt_file are mutually exclusive", key))

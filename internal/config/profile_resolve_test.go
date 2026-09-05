@@ -67,6 +67,81 @@ func TestResolveAgentProfile_Builtins(t *testing.T) {
 	})
 }
 
+// TestResolvePrimaryAgentProfile_UsesCoderPalette locks the primary/child
+// tool boundary: every selected primary exposes the complete built-in
+// coder palette (subject only to options.disabled_tools), regardless of
+// how narrow its child policy is, while child projections keep the
+// profile policy and never gain the delegation pair or task controls.
+func TestResolvePrimaryAgentProfile_UsesCoderPalette(t *testing.T) {
+	t.Parallel()
+	cfg := profileCfg(t, map[string]AgentProfilePatch{
+		"narrow": {
+			AllowedTools: Some([]string{"view", DelegationToolName, agenticFetchToolName}),
+			AllowedMCP:   Some(map[string][]string{}),
+		},
+	})
+
+	coder, err := cfg.ResolvePrimaryAgentProfile(AgentCoder)
+	require.NoError(t, err)
+
+	for _, name := range []string{AgentOracle, AgentExplore, "narrow"} {
+		primary, err := cfg.ResolvePrimaryAgentProfile(name)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, coder.Agent.AllowedTools, primary.Agent.AllowedTools,
+			"primary %s gets the same palette as coder", name)
+		for _, tool := range []string{
+			DelegationToolName, agenticFetchToolName,
+			"agent_status", "agent_output", "agent_list", "agent_cancel", "agent_message",
+			"bash", "edit", "write", "fetch", "lsp_references", "list_mcp_resources",
+		} {
+			assert.Contains(t, primary.Agent.AllowedTools, tool,
+				"primary %s exposes %s", name, tool)
+		}
+		assert.Nil(t, primary.Agent.AllowedMCP,
+			"primary %s carries no MCP restriction", name)
+	}
+
+	// Role-level tool policy must not drop the profile's own overrides:
+	// oracle keeps its built-in prompt on the primary projection.
+	oraclePrimary, err := cfg.ResolvePrimaryAgentProfile(AgentOracle)
+	require.NoError(t, err)
+	assert.NotEmpty(t, oraclePrimary.SystemPrompt,
+		"the profile prompt override survives the palette swap")
+
+	// Children keep the profile policy after the primary resolutions
+	// above: the projection must not have leaked through slice aliasing
+	// of the shared coder Agents entry.
+	oracleChild, err := cfg.ResolveAgentProfile(AgentOracle)
+	require.NoError(t, err)
+	assert.Contains(t, oracleChild.Agent.AllowedTools, "view")
+	assert.Empty(t, oracleChild.Agent.AllowedMCP,
+		"the research child still carries its no-MCP policy")
+	for _, tool := range []string{
+		"bash", "edit", "write", DelegationToolName, agenticFetchToolName, "agent_status",
+	} {
+		assert.False(t, slices.Contains(oracleChild.Agent.AllowedTools, tool),
+			"child oracle never sees %s", tool)
+	}
+	narrowChild, err := cfg.ResolveAgentProfile("narrow")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"view"}, narrowChild.Agent.AllowedTools,
+		"child depth stays at the profile allow-list; the delegation pair is denied")
+
+	// options.disabled_tools subtracts from the primary baseline.
+	cfgDisabled := &Config{
+		Options:   &Options{DisabledTools: []string{DelegationToolName, "agent_status", "bash"}},
+		Providers: csync.NewMap[string, ProviderConfig](),
+	}
+	cfgDisabled.SetupAgents()
+	disabledPrimary, err := cfgDisabled.ResolvePrimaryAgentProfile(AgentOracle)
+	require.NoError(t, err)
+	assert.False(t, slices.Contains(disabledPrimary.Agent.AllowedTools, DelegationToolName))
+	assert.False(t, slices.Contains(disabledPrimary.Agent.AllowedTools, "agent_status"))
+	assert.False(t, slices.Contains(disabledPrimary.Agent.AllowedTools, "bash"))
+	assert.Contains(t, disabledPrimary.Agent.AllowedTools, "agent_list")
+	assert.Contains(t, disabledPrimary.Agent.AllowedTools, "edit")
+}
+
 func TestResolveAgentProfile_Unknown(t *testing.T) {
 	t.Parallel()
 	cfg := profileCfg(t, nil)
@@ -159,6 +234,50 @@ func TestResolveAgentProfile_ModelOverride(t *testing.T) {
 	})
 }
 
+func TestResolveAgentProfile_ReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	t.Run("omitted effort is not present", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			"reviewer": {Model: Some("openai/gpt-4o")},
+		})
+		prof, err := cfg.ResolveAgentProfile("reviewer")
+		require.NoError(t, err)
+		assert.False(t, prof.ReasoningEffort.Present)
+		assert.Empty(t, prof.Model.ReasoningEffort, "the model ref stays untouched")
+	})
+
+	t.Run("effort survives with a model override", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			"deep": {Model: Some("openai/gpt-4o"), ReasoningEffort: Some("xhigh")},
+		})
+		prof, err := cfg.ResolveAgentProfile("deep")
+		require.NoError(t, err)
+		assert.Equal(t, Some("xhigh"), prof.ReasoningEffort)
+		require.True(t, prof.ModelSet)
+		assert.Equal(t, "gpt-4o", prof.Model.Model)
+	})
+
+	t.Run("effort survives without a model override", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			"thinky": {ReasoningEffort: Some("minimal")},
+		})
+		prof, err := cfg.ResolveAgentProfile("thinky")
+		require.NoError(t, err)
+		assert.Equal(t, Some("minimal"), prof.ReasoningEffort)
+		assert.False(t, prof.ModelSet)
+	})
+
+	t.Run("user patch effort overrides the builtin roster default", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			"oracle": {ReasoningEffort: Some("max")},
+		})
+		prof, err := cfg.ResolveAgentProfile("oracle")
+		require.NoError(t, err)
+		assert.Equal(t, Some("max"), prof.ReasoningEffort)
+	})
+}
+
 func TestResolveAgentProfile_PromptOverride(t *testing.T) {
 	t.Parallel()
 	cfg := profileCfg(t, map[string]AgentProfilePatch{
@@ -245,5 +364,74 @@ func TestResolveAgentProfile_RuntimePolicy(t *testing.T) {
 		assert.True(t, prof.CanDelegate)
 		assert.False(t, slices.Contains(prof.Agent.AllowedTools, DelegationToolName),
 			"child depth always denies delegation")
+	})
+}
+
+// TestDiscoverableAgentProfiles locks the discovery semantics: every
+// built-in and configured profile is listed while none is disabled, and a
+// disabled profile drops out of discovery for built-ins (coder/task),
+// roster entries, and custom profiles alike.
+func TestDiscoverableAgentProfiles(t *testing.T) {
+	t.Parallel()
+
+	t.Run("lists built-ins and custom profiles deterministically", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			"Reviewer": {Description: Some("d")},
+			"scribe":   {Description: Some("s")},
+		})
+		names := cfg.DiscoverableAgentProfiles()
+		roster := BuiltinAgentProfileNames()
+		require.Len(t, names, len(roster)+2)
+		assert.Equal(t, roster, names[:len(roster)],
+			"roster names lead in declaration order")
+		assert.Equal(t, []string{"reviewer", "scribe"}, names[len(roster):],
+			"extra user keys follow sorted, case-folded, deduplicated")
+		assert.Equal(t, names, cfg.DiscoverableAgentProfiles(),
+			"repeated calls are identical")
+	})
+
+	t.Run("disabling coder or task removes them from discovery", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			AgentCoder: {Disabled: Some(true)},
+		})
+		assert.NotContains(t, cfg.DiscoverableAgentProfiles(), AgentCoder)
+		assert.Contains(t, cfg.DiscoverableAgentProfiles(), AgentTask)
+
+		cfg = profileCfg(t, map[string]AgentProfilePatch{
+			AgentTask: {Disabled: Some(true)},
+		})
+		assert.NotContains(t, cfg.DiscoverableAgentProfiles(), AgentTask)
+		assert.Contains(t, cfg.DiscoverableAgentProfiles(), AgentCoder)
+	})
+
+	t.Run("disabling a roster or custom profile removes it from discovery", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			AgentAtlas: {Disabled: Some(true)},
+			"reviewer": {Description: Some("d")},
+			"off":      {Disabled: Some(true)},
+		})
+		names := cfg.DiscoverableAgentProfiles()
+		assert.NotContains(t, names, AgentAtlas)
+		assert.NotContains(t, names, "off")
+		assert.Contains(t, names, "reviewer")
+		assert.Contains(t, names, AgentPrometheus, "other roster entries survive")
+	})
+
+	t.Run("unlisted profiles cannot be resolved", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			AgentCoder: {Disabled: Some(true)},
+			"off":      {Disabled: Some(true)},
+		})
+		_, err := cfg.ResolveAgentProfile(AgentCoder)
+		require.ErrorIs(t, err, ErrAgentProfileDisabled)
+		_, err = cfg.ResolveAgentProfile("off")
+		require.ErrorIs(t, err, ErrAgentProfileDisabled)
+	})
+
+	t.Run("the reserved internal profile is never listed", func(t *testing.T) {
+		cfg := profileCfg(t, map[string]AgentProfilePatch{
+			AgenticFetchInternalProfile: {Description: Some("forged")},
+		})
+		assert.NotContains(t, cfg.DiscoverableAgentProfiles(), AgenticFetchInternalProfile)
 	})
 }

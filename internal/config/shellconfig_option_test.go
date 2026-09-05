@@ -3,6 +3,7 @@ package config_test
 import (
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -125,6 +126,34 @@ func TestShellConfigOptionDisableToolRemoved(t *testing.T) {
 	_, err := loadCrushShErr(t, `option disable-tool bash`)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown key")
+}
+
+func TestShellConfigOptionTaskLimits(t *testing.T) {
+	store := loadCrushSh(t, `option live-tasks-per-parent 3
+option live-tasks-per-workspace 12
+option running-tasks-per-model 8`)
+
+	opts := store.Config().Options
+	require.Equal(t, 3, opts.LiveTasksPerParent)
+	require.Equal(t, 12, opts.LiveTasksPerWorkspace)
+	require.NotNil(t, opts.RunningTasksPerModel)
+	require.Equal(t, 8, *opts.RunningTasksPerModel)
+}
+
+func TestShellConfigOptionTaskLimitsUnsetIsDefault(t *testing.T) {
+	store := loadCrushSh(t, `option debug true`)
+
+	opts := store.Config().Options
+	require.Zero(t, opts.LiveTasksPerParent, "unset means unlimited")
+	require.Zero(t, opts.LiveTasksPerWorkspace)
+	require.Nil(t, opts.RunningTasksPerModel)
+	require.Equal(t, config.DefaultRunningTasksPerModel, opts.RunningTasksPerModelOrDefault())
+}
+
+func TestShellConfigOptionTaskLimitsRejectsNegative(t *testing.T) {
+	_, err := loadCrushShErr(t, `option live-tasks-per-parent -1`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "non-negative integer")
 }
 
 func TestShellConfigOptionResetRejectsNonList(t *testing.T) {

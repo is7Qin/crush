@@ -69,6 +69,7 @@ type AgentProfilePatch struct {
 	PromptFile      Optional[string]              `json:"prompt_file,omitempty"`
 	Model           Optional[string]              `json:"model,omitempty"`
 	Models          Optional[[]string]            `json:"models,omitempty"`
+	ReasoningEffort Optional[string]              `json:"reasoning_effort,omitempty"`
 	AllowedTools    Optional[[]string]            `json:"allowed_tools,omitempty"`
 	AllowedMCP      Optional[map[string][]string] `json:"allowed_mcp,omitempty"`
 	DeniedTools     Optional[[]string]            `json:"denied_tools,omitempty"`
@@ -105,6 +106,9 @@ func (p AgentProfilePatch) MarshalJSON() ([]byte, error) {
 	}
 	if p.Models.Present {
 		out["models"] = p.Models.Value
+	}
+	if p.ReasoningEffort.Present {
+		out["reasoning_effort"] = p.ReasoningEffort.Value
 	}
 	if p.AllowedTools.Present {
 		out["allowed_tools"] = p.AllowedTools.Value
@@ -164,6 +168,9 @@ func (p AgentProfilePatch) mergeOnto(override AgentProfilePatch) AgentProfilePat
 	}
 	if override.Models.Present {
 		merged.Models = override.Models
+	}
+	if override.ReasoningEffort.Present {
+		merged.ReasoningEffort = override.ReasoningEffort
 	}
 	if override.AllowedTools.Present {
 		merged.AllowedTools = override.AllowedTools
