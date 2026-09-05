@@ -451,11 +451,13 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		NewCommandItem(c.com.Styles, "new_session", "New Session", "ctrl+n", ActionNewSession{}).WithAliases("clear"),
 		NewCommandItem(c.com.Styles, "switch_session", "Sessions", "ctrl+s", ActionOpenDialog{SessionsID}),
 		NewCommandItem(c.com.Styles, "switch_model", "Switch Model", "ctrl+l", ActionOpenDialog{ModelsID}),
+		NewCommandItem(c.com.Styles, "switch_agent", "Switch Agent", "", ActionOpenDialog{DialogID: AgentsID}).WithAliases("primary agent", "agent profile"),
 	}
 
 	// Only show compact command if there's an active session
 	if c.hasSession {
 		commands = append(commands, NewCommandItem(c.com.Styles, "summarize", "Summarize Session", "", ActionSummarize{SessionID: c.sessionID}))
+		commands = append(commands, NewCommandItem(c.com.Styles, "subagents", "Subagents", "", ActionOpenDialog{DialogID: SubagentsID}).WithAliases("sub agents", "child tasks"))
 	}
 
 	// Add reasoning toggle for models that support it

@@ -36,6 +36,18 @@ type ActionSelectSession struct {
 	Session session.Session
 }
 
+// ActionSelectSubagent is a message indicating the child session of a
+// subagent task has been selected.
+type ActionSelectSubagent struct {
+	ChildSessionID string
+}
+
+// ActionSelectAgentProfile is a message indicating a primary agent
+// profile has been selected in the Switch Agent dialog.
+type ActionSelectAgentProfile struct {
+	Profile string
+}
+
 // ActionSelectModel is a message indicating a model has been selected.
 type ActionSelectModel struct {
 	Provider       catwalk.Provider
