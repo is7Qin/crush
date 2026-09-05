@@ -21,68 +21,11 @@ func (c *coordinator) buildPrimaryAgent(ctx context.Context, name string) (Sessi
 		return nil, config.ResolvedProfile{}, fmt.Errorf("%w: %s", config.ErrUnknownAgentProfile, profile.Name)
 	}
 
-	large, small, err := c.buildPrimaryProfileModels(ctx, profile)
+	agent, err := c.buildProfileSessionAgent(ctx, profile, true)
 	if err != nil {
 		return nil, config.ResolvedProfile{}, err
 	}
-	systemPrompt, err := c.profileSystemPrompt(ctx, profile, large, true)
-	if err != nil {
-		return nil, config.ResolvedProfile{}, err
-	}
-	agentTools, err := c.buildTools(ctx, profile.Agent, false)
-	if err != nil {
-		return nil, config.ResolvedProfile{}, err
-	}
-
-	largeProviderCfg, ok := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
-	if !ok {
-		return nil, config.ResolvedProfile{}, fmt.Errorf("model provider not configured: %s", large.ModelCfg.Provider)
-	}
-	return NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
-		SmallModel:           small,
-		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
-		SystemPrompt:         systemPrompt,
-		IsSubAgent:           false,
-		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
-		IsYolo:               c.permissions.SkipRequests(),
-		Sessions:             c.sessions,
-		Messages:             c.messages,
-		Tools:                agentTools,
-		Notify:               c.notify,
-		RunComplete:          c.runComplete,
-		MaxSteps:             profile.MaxSteps,
-	}), profile, nil
-}
-
-func (c *coordinator) buildPrimaryProfileModels(ctx context.Context, profile config.ResolvedProfile) (Model, Model, error) {
-	if !profile.ModelSet {
-		large, small, err := c.buildAgentModels(ctx, false)
-		if err != nil {
-			return Model{}, Model{}, err
-		}
-		if profile.ReasoningEffort.Present {
-			large.ModelCfg.ReasoningEffort = profile.ReasoningEffort.Value
-		}
-		return large, small, nil
-	}
-
-	large, err := c.buildModel(ctx, profile.Model, false)
-	if err != nil {
-		return Model{}, Model{}, err
-	}
-	smallCfg, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]
-	if !ok {
-		return Model{}, Model{}, errSmallModelNotSelected
-	}
-	small, err := c.buildModel(ctx, smallCfg, true)
-	if err != nil {
-		return Model{}, Model{}, err
-	}
-	if profile.ReasoningEffort.Present {
-		large.ModelCfg.ReasoningEffort = profile.ReasoningEffort.Value
-	}
-	return large, small, nil
+	return agent, profile, nil
 }
 
 func (c *coordinator) beginPrimaryRun() (SessionAgent, func(), error) {

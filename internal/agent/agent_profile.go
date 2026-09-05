@@ -37,37 +37,11 @@ func (c *coordinator) buildProfileAgent(ctx context.Context, name, requestModel 
 		prof.Model, prof.ModelSet = sel, true
 	}
 
-	large, small, err := c.buildProfileModels(ctx, prof)
+	agent, err := c.buildProfileSessionAgent(ctx, prof, false)
 	if err != nil {
 		return nil, config.ResolvedProfile{}, err
 	}
-
-	systemPrompt, err := c.profileSystemPrompt(ctx, prof, large, false)
-	if err != nil {
-		return nil, config.ResolvedProfile{}, err
-	}
-
-	agentTools, err := c.buildTools(ctx, prof.Agent, true)
-	if err != nil {
-		return nil, config.ResolvedProfile{}, err
-	}
-
-	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
-	return NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
-		SmallModel:           small,
-		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
-		SystemPrompt:         systemPrompt,
-		IsSubAgent:           true,
-		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
-		IsYolo:               c.permissions.SkipRequests(),
-		Sessions:             c.sessions,
-		Messages:             c.messages,
-		Tools:                agentTools,
-		Notify:               c.notify,
-		RunComplete:          c.runComplete,
-		MaxSteps:             prof.MaxSteps,
-	}), prof, nil
+	return agent, prof, nil
 }
 
 // buildProfileModels resolves the child's model pair, honoring the
@@ -76,11 +50,11 @@ func (c *coordinator) buildProfileAgent(ctx context.Context, name, requestModel 
 // effort; whether the model supports it is decided later by
 // effectiveReasoningEffort, which falls back to the model default instead
 // of sending an unsupported level.
-func (c *coordinator) buildProfileModels(ctx context.Context, prof config.ResolvedProfile) (Model, Model, error) {
+func (c *coordinator) buildProfileModels(ctx context.Context, prof config.ResolvedProfile, primary bool) (Model, Model, error) {
 	var large, small Model
 	var err error
 	if prof.ModelSet {
-		large, err = c.buildModel(ctx, prof.Model, true)
+		large, err = c.buildModel(ctx, prof.Model, !primary)
 		if err != nil {
 			return Model{}, Model{}, err
 		}
@@ -93,7 +67,7 @@ func (c *coordinator) buildProfileModels(ctx context.Context, prof config.Resolv
 			return Model{}, Model{}, err
 		}
 	} else {
-		large, small, err = c.buildAgentModels(ctx, true)
+		large, small, err = c.buildAgentModels(ctx, !primary)
 		if err != nil {
 			return Model{}, Model{}, err
 		}
@@ -102,6 +76,41 @@ func (c *coordinator) buildProfileModels(ctx context.Context, prof config.Resolv
 		large.ModelCfg.ReasoningEffort = prof.ReasoningEffort.Value
 	}
 	return large, small, nil
+}
+
+func (c *coordinator) buildProfileSessionAgent(ctx context.Context, prof config.ResolvedProfile, primary bool) (SessionAgent, error) {
+	large, small, err := c.buildProfileModels(ctx, prof, primary)
+	if err != nil {
+		return nil, err
+	}
+	systemPrompt, err := c.profileSystemPrompt(ctx, prof, large, primary)
+	if err != nil {
+		return nil, err
+	}
+	agentTools, err := c.buildTools(ctx, prof.Agent, !primary)
+	if err != nil {
+		return nil, err
+	}
+
+	largeProviderCfg, ok := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
+	if primary && !ok {
+		return nil, fmt.Errorf("model provider not configured: %s", large.ModelCfg.Provider)
+	}
+	return NewSessionAgent(SessionAgentOptions{
+		LargeModel:           large,
+		SmallModel:           small,
+		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
+		SystemPrompt:         systemPrompt,
+		IsSubAgent:           !primary,
+		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
+		IsYolo:               c.permissions.SkipRequests(),
+		Sessions:             c.sessions,
+		Messages:             c.messages,
+		Tools:                agentTools,
+		Notify:               c.notify,
+		RunComplete:          c.runComplete,
+		MaxSteps:             prof.MaxSteps,
+	}), nil
 }
 
 const childPromptRestriction = `

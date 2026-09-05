@@ -1415,7 +1415,7 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	large, small, err := c.buildPrimaryProfileModels(ctx, profile)
+	large, small, err := c.buildProfileModels(ctx, profile, true)
 	if err != nil {
 		return err
 	}
