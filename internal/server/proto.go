@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/backend"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
@@ -845,6 +847,53 @@ func (c *controllerV1) handlePostWorkspaceAgentUpdate(w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceAgentPrimary switches the workspace's runtime
+// primary agent profile. The caller must present a client_id naming an
+// attached client, so only clients sharing the workspace can move its
+// primary agent.
+//
+//	@Summary		Set primary agent
+//	@Tags			agent
+//	@Accept			json
+//	@Param			id			path	string						true	"Workspace ID"
+//	@Param			client_id	query	string						true	"Attached client ID (UUID)"
+//	@Param			request		body	proto.AgentPrimaryRequest	true	"Primary agent selection"
+//	@Success		200
+//	@Failure		400	{object}	proto.Error
+//	@Failure		401	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		409	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/agent/primary [post]
+func (c *controllerV1) handlePostWorkspaceAgentPrimary(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	cid := r.URL.Query().Get("client_id")
+	if cid == "" {
+		jsonErrorCode(w, http.StatusUnauthorized, "client_required", "client_id is required")
+		return
+	}
+	if _, err := uuid.Parse(cid); err != nil {
+		jsonErrorCode(w, http.StatusUnauthorized, "client_required", "client_id is not a valid UUID")
+		return
+	}
+
+	var req proto.AgentPrimaryRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			c.server.logError(r, "Failed to decode agent primary request", "error", err)
+			jsonError(w, http.StatusBadRequest, "failed to decode request")
+			return
+		}
+	}
+
+	if err := c.backend.SetPrimaryAgent(r.Context(), id, cid, req.Profile); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // handleGetWorkspaceAgentSession returns a specific agent session.
 //
 //	@Summary		Get agent session
@@ -1192,8 +1241,12 @@ func (c *controllerV1) handleError(w http.ResponseWriter, r *http.Request, err e
 		status = http.StatusConflict
 	case errors.Is(err, backend.ErrWorkspaceClosing),
 		errors.Is(err, backend.ErrServerNotIdle),
-		errors.Is(err, backend.ErrClientRetired):
+		errors.Is(err, backend.ErrClientRetired),
+		errors.Is(err, agent.ErrPrimaryAgentBusy):
 		status = http.StatusConflict
+	case errors.Is(err, config.ErrUnknownAgentProfile),
+		errors.Is(err, config.ErrAgentProfileDisabled):
+		status = http.StatusBadRequest
 	case errors.Is(err, backend.ErrServerShuttingDown):
 		// 503, not 409: the request is not wrong, this process is just
 		// leaving. Clients retry against its replacement.

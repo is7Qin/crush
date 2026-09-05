@@ -517,6 +517,72 @@ func TestTaskEvents_DroppedStreamResyncFromSQLite(t *testing.T) {
 	require.NotNil(t, resync.Questions)
 }
 
+// TestTaskList_ParentFilterAndHidden pins the subagent-switcher read:
+// GET /tasks returns exactly the caller's direct child tasks, the
+// parent_session_id filter is accepted only when it equals the
+// server-derived caller and rejected 403 otherwise, and hidden
+// system-owned (agentic_fetch) tasks never surface on the wire.
+func TestTaskList_ParentFilterAndHidden(t *testing.T) {
+	th := newTaskHarness(t)
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	visible := th.startTask(t, "tc-vis", "public work", parkUntilRelease(entered, release))
+	<-entered
+
+	hidden, err := th.ws.App.Tasks().Start(t.Context(), task.StartRequest{
+		CallerSessionID: th.owner,
+		ParentSessionID: th.owner,
+		ChildSessionID:  uuid.NewString(),
+		ParentMessageID: "pm-hidden",
+		ToolCallID:      "tc-hidden",
+		Profile:         task.HiddenProfile,
+		Prompt:          "hidden work",
+		Run:             parkUntilRelease(entered, release),
+	})
+	require.NoError(t, err)
+	<-entered
+
+	// Both the unfiltered and the matching-parent read return the
+	// visible task only: the hidden record never reaches the wire.
+	for _, tc := range []struct{ name, parent string }{
+		{"unfiltered", ""},
+		{"matching parent", th.owner},
+	} {
+		q := th.query("")
+		if tc.parent != "" {
+			q.Set("parent_session_id", tc.parent)
+		}
+		status, body := taskHTTP(t, th.h, http.MethodGet, "/v1/workspaces/"+th.wsID+"/tasks", q, nil)
+		require.Equal(t, http.StatusOK, status, tc.name)
+		var list proto.TaskListResponse
+		require.NoError(t, json.Unmarshal(body, &list), tc.name)
+		require.Len(t, list.Tasks, 1, tc.name)
+		require.Equal(t, visible.ID, list.Tasks[0].ID, tc.name)
+		require.NotEqual(t, hidden.ID, list.Tasks[0].ID, tc.name)
+	}
+
+	// A parent filter naming another session is 403 before any read.
+	other, err := th.h.backend.CreateSession(t.Context(), th.wsID, "other")
+	require.NoError(t, err)
+	q := th.query("")
+	q.Set("parent_session_id", other.ID)
+	status, body := taskHTTP(t, th.h, http.MethodGet, "/v1/workspaces/"+th.wsID+"/tasks", q, nil)
+	require.Equal(t, http.StatusForbidden, status)
+	requireWireCode(t, body, "task_owner_forbidden")
+
+	// Drain both attempts before the harness releases the database.
+	close(release)
+	require.Eventually(t, func() bool {
+		v, err := th.ws.App.Tasks().Status(t.Context(), th.owner, visible.ID)
+		if err != nil {
+			return false
+		}
+		h, err := th.ws.App.Tasks().Store().Get(t.Context(), hidden.ID)
+		return err == nil && v.Status.Terminal() && h.Status.Terminal()
+	}, 20*time.Second, 25*time.Millisecond, "both attempts must terminalize before teardown")
+}
+
 // TestTaskQuestions_AnswerOverSSE is spec procedure step 6: a real
 // child question reaches the client as an extended task-question
 // envelope, the owner answers through the named route, and the same

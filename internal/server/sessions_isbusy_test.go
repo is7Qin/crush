@@ -22,9 +22,13 @@ import (
 // stubCoordinator is a minimal agent.Coordinator that only reports
 // per-session busy state. Every other method returns a zero value so
 // the type satisfies the interface without dragging in the full
-// coordinator dependency graph.
+// coordinator dependency graph. SetPrimaryAgent records the selected
+// profile unless failPrimary is armed, letting the primary-agent route
+// tests inject busy/unknown/disabled outcomes.
 type stubCoordinator struct {
-	busy map[string]bool
+	busy        map[string]bool
+	failPrimary error
+	primary     string
 }
 
 func (s *stubCoordinator) Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
@@ -50,8 +54,16 @@ func (s *stubCoordinator) ClearQueue(string)                 {}
 func (s *stubCoordinator) Summarize(context.Context, string) error {
 	return nil
 }
-func (s *stubCoordinator) Model() agent.Model                            { return agent.Model{} }
-func (s *stubCoordinator) UpdateModels(context.Context) error            { return nil }
+func (s *stubCoordinator) Model() agent.Model                 { return agent.Model{} }
+func (s *stubCoordinator) UpdateModels(context.Context) error { return nil }
+func (s *stubCoordinator) SetPrimaryAgent(_ context.Context, profile string) error {
+	if s.failPrimary != nil {
+		return s.failPrimary
+	}
+	s.primary = profile
+	return nil
+}
+func (s *stubCoordinator) PrimaryAgent() string                          { return s.primary }
 func (s *stubCoordinator) GenerateTitle(context.Context, string, string) {}
 
 // stubSessions is a minimal session.Service that returns a fixed list
