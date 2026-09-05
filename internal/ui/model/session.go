@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -23,9 +24,10 @@ import (
 // loadSessionMsg is a message indicating that a session and its files have
 // been loaded.
 type loadSessionMsg struct {
-	session   *session.Session
-	files     []SessionFile
-	readFiles []string
+	session    *session.Session
+	files      []SessionFile
+	readFiles  []string
+	taskResync *proto.TaskResyncResponse
 }
 
 // lspFilePaths returns deduplicated file paths from both modified and read
@@ -70,6 +72,10 @@ type SessionFile struct {
 // That report is fire-and-forget: errors are logged at debug and the
 // UI never blocks on the call.
 func (m *UI) loadSession(sessionID string) tea.Cmd {
+	return m.loadSessionWithTaskResync(sessionID, nil)
+}
+
+func (m *UI) loadSessionWithTaskResync(sessionID string, taskResync *proto.TaskResyncResponse) tea.Cmd {
 	load := func() tea.Msg {
 		session, err := m.com.Workspace.GetSession(context.Background(), sessionID)
 		if err != nil {
@@ -87,9 +93,10 @@ func (m *UI) loadSession(sessionID string) tea.Cmd {
 		}
 
 		return loadSessionMsg{
-			session:   &session,
-			files:     sessionFiles,
-			readFiles: readFiles,
+			session:    &session,
+			files:      sessionFiles,
+			readFiles:  readFiles,
+			taskResync: taskResync,
 		}
 	}
 	return tea.Batch(load, m.reportCurrentSession(sessionID))

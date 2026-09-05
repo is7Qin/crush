@@ -836,6 +836,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.setSessionMessages(msgs); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		if msg.taskResync != nil {
+			m.applyTaskResync(*msg.taskResync)
+		}
 		if cmd := m.restoreModelFromSession(msgs); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1053,6 +1056,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleTaskQuestionNotification(msg.Payload)
 	case pubsub.Event[task.Event]:
 		m.handleTaskEvent(msg.Payload)
+		if cmd := m.refreshSubagentsCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case subagentsFetchMsg:
+		m.applySubagentsFetch(msg)
+	case currentAgentMsg:
+		m.applyCurrentAgent(msg)
+	case switchAgentMsg:
+		cmds = append(cmds, m.applySwitchAgent(msg)...)
 	case cancelTimerExpiredMsg:
 		m.isCanceling = false
 	case tea.TerminalVersionMsg:
@@ -1589,7 +1601,9 @@ func (m *UI) handleConnectionEvent(msg workspace.ConnectionEvent) []tea.Cmd {
 	m.status.SetInfoMsg(info)
 	cmds := []tea.Cmd{clearInfoMsgCmd(info.TTL)}
 	if msg.State == workspace.ConnectionRecovered && m.session != nil {
-		cmds = append(cmds, m.loadSession(m.session.ID))
+		cmds = append(cmds, m.loadSessionWithTaskResync(m.session.ID, msg.TaskResync))
+	} else if msg.State == workspace.ConnectionRecovered && msg.TaskResync != nil {
+		m.applyTaskResync(*msg.TaskResync)
 	}
 	return cmds
 }
@@ -1930,6 +1944,23 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	case dialog.ActionSelectSession:
 		m.dialog.CloseDialog(dialog.SessionsID)
 		cmds = append(cmds, m.loadSession(msg.Session.ID))
+
+	// Subagents dialog messages. Selecting a task switches to its
+	// child session through the same load path; the parent stays
+	// reachable through the Sessions dialog.
+	case dialog.ActionSelectSubagent:
+		m.dialog.CloseDialog(dialog.SubagentsID)
+		cmds = append(cmds, m.loadSession(msg.ChildSessionID))
+
+	// Switch Agent dialog. The switch runs in a tea.Cmd; failures keep
+	// the dialog, session, and previous profile untouched and are
+	// reported by the switchAgentMsg handler.
+	case dialog.ActionSelectAgentProfile:
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
+			break
+		}
+		cmds = append(cmds, m.switchPrimaryAgentCmd(msg.Profile))
 
 	// Open dialog message.
 	case dialog.ActionOpenDialog:
@@ -4493,6 +4524,14 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openSessionsDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.SubagentsID:
+		if cmd := m.openSubagentsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.AgentsID:
+		if cmd := m.openAgentsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dialog.ModelsID:
 		if cmd := m.openModelsDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -4703,6 +4742,12 @@ func (m *UI) openBatchFormDialog(batch question.Request) {
 // displace a live form: they queue FIFO and the queue is drained when
 // the slot frees.
 func (m *UI) openTaskQuestionDialog(q taskquestion.TaskQuestion) {
+	if m.activeTaskQuestion != nil && m.activeTaskQuestion.QuestionID == q.QuestionID {
+		return
+	}
+	if m.activeQuestionKey == q.QuestionID {
+		return
+	}
 	if m.activeInline != nil {
 		for _, p := range m.pendingTaskQuestions {
 			if p.QuestionID == q.QuestionID {
