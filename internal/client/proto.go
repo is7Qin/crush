@@ -504,6 +504,24 @@ func (c *Client) UpdateAgent(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetPrimaryAgent switches the workspace's runtime primary agent to the
+// named profile. The server authenticates the process client id, so the
+// call only succeeds from a client attached to the workspace.
+func (c *Client) SetPrimaryAgent(ctx context.Context, id, profile string) error {
+	q := url.Values{"client_id": []string{c.clientID}}
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/primary", id), q,
+		jsonBody(proto.AgentPrimaryRequest{Profile: profile}),
+		http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set primary agent: %w", err)
+	}
+	defer rsp.Body.Close()
+	if err := checkStatus(rsp); err != nil {
+		return fmt.Errorf("failed to set primary agent: %w", err)
+	}
+	return nil
+}
+
 // SendMessage sends a message to the agent for a workspace.
 //
 // When runID is non-empty it is echoed back on the resulting

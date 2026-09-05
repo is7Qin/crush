@@ -123,6 +123,10 @@ type AgentInfo struct {
 	IsReady  bool                 `json:"is_ready"`
 	Model    catwalk.Model        `json:"model"`
 	ModelCfg config.SelectedModel `json:"model_cfg"`
+	// PrimaryAgent is the canonical name of the profile the primary
+	// agent is currently running as. Empty until a primary agent is
+	// initialized or explicitly selected.
+	PrimaryAgent string `json:"primary_agent,omitempty"`
 }
 
 // IsZero checks if the AgentInfo is zero-valued.

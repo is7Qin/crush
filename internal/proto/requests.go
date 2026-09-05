@@ -107,6 +107,13 @@ type AgentInitRequest struct {
 	Interactive bool `json:"interactive"`
 }
 
+// AgentPrimaryRequest represents a request to switch the workspace's
+// runtime primary agent to the named profile. The selection is
+// in-memory only and is never persisted to config.
+type AgentPrimaryRequest struct {
+	Profile string `json:"profile"`
+}
+
 // LSPStartRequest represents a request to start an LSP for a path.
 type LSPStartRequest struct {
 	Path string `json:"path"`
