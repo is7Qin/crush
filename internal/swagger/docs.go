@@ -447,6 +447,77 @@ const docTemplate = `{
                 }
             }
         },
+        "/workspaces/{id}/agent/primary": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "agent"
+                ],
+                "summary": "Set primary agent",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "description": "Primary agent selection",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.AgentPrimaryRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
         "/workspaces/{id}/agent/sessions/{sid}": {
             "get": {
                 "produces": [
@@ -1579,6 +1650,105 @@ const docTemplate = `{
                 }
             }
         },
+        "/workspaces/{id}/mcp/auth": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Authenticate an MCP server",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "MCP name request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.MCPNameRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.MCPAuthResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/mcp/auth-url": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Get MCP OAuth authorization URL",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "MCP server name",
+                        "name": "name",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.MCPAuthResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
         "/workspaces/{id}/mcp/docker/disable": {
             "post": {
                 "tags": [
@@ -1688,6 +1858,49 @@ const docTemplate = `{
                         "description": "Bad Request",
                         "schema": {
                             "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/mcp/pending-auth": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Get MCP servers pending OAuth",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/proto.MCPPendingAuthServer"
+                            }
                         }
                     },
                     "404": {
@@ -2993,6 +3206,394 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/workspaces/{id}/task-questions/answer": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "questions"
+                ],
+                "summary": "Answer task question",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "description": "Task question answer",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskQuestionAnswerRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskQuestionResolutionResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/task-questions/cancel": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "questions"
+                ],
+                "summary": "Cancel task question",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "description": "Task question cancellation",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskQuestionCancelRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskQuestionResolutionResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/task-questions/pending": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "questions"
+                ],
+                "summary": "List pending task questions",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskQuestionListResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/tasks": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "List caller tasks",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Parent session filter (must equal the caller's current session)",
+                        "name": "parent_session_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskListResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/tasks/resync": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "Resync tasks",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskResyncResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/tasks/{tid}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "Get task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "tid",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskSnapshot"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/tasks/{tid}/cancel": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "Cancel task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "tid",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.AgentCancelAccepted"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/tasks/{tid}/messages": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "Send direct child message",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "tid",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "description": "Child message",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.ChildMessageRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "$ref": "#/definitions/proto.ChildMessageAccepted"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/tasks/{tid}/output": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tasks"
+                ],
+                "summary": "Get task output",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "tid",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attached client ID (UUID)",
+                        "name": "client_id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.TaskOutputResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -3067,6 +3668,65 @@ const docTemplate = `{
                 }
             }
         },
+        "config.AgentProfilePatch": {
+            "type": "object",
+            "properties": {
+                "allowed_mcp": {
+                    "type": "object"
+                },
+                "allowed_tools": {
+                    "$ref": "#/definitions/config.Optional-array_string"
+                },
+                "can_ask_questions": {
+                    "$ref": "#/definitions/config.Optional-bool"
+                },
+                "can_delegate": {
+                    "$ref": "#/definitions/config.Optional-bool"
+                },
+                "context_paths": {
+                    "$ref": "#/definitions/config.Optional-array_string"
+                },
+                "denied_tools": {
+                    "$ref": "#/definitions/config.Optional-array_string"
+                },
+                "description": {
+                    "$ref": "#/definitions/config.Optional-string"
+                },
+                "disabled": {
+                    "$ref": "#/definitions/config.Optional-bool"
+                },
+                "max_duration": {
+                    "$ref": "#/definitions/config.Optional-time_Duration"
+                },
+                "max_steps": {
+                    "$ref": "#/definitions/config.Optional-int"
+                },
+                "model": {
+                    "$ref": "#/definitions/config.Optional-string"
+                },
+                "models": {
+                    "$ref": "#/definitions/config.Optional-array_string"
+                },
+                "name": {
+                    "$ref": "#/definitions/config.Optional-string"
+                },
+                "prompt_file": {
+                    "$ref": "#/definitions/config.Optional-string"
+                },
+                "reasoning_effort": {
+                    "$ref": "#/definitions/config.Optional-string"
+                },
+                "role": {
+                    "$ref": "#/definitions/config.Optional-string"
+                },
+                "skills": {
+                    "$ref": "#/definitions/config.Optional-array_string"
+                },
+                "system_prompt": {
+                    "$ref": "#/definitions/config.Optional-string"
+                }
+            }
+        },
         "config.Attribution": {
             "type": "object",
             "properties": {
@@ -3091,6 +3751,19 @@ const docTemplate = `{
                     "type": "integer"
                 }
             }
+        },
+        "config.ExitBanner": {
+            "type": "string",
+            "enum": [
+                "default",
+                "compact",
+                "none"
+            ],
+            "x-enum-varnames": [
+                "ExitBannerDefault",
+                "ExitBannerCompact",
+                "ExitBannerNone"
+            ]
         },
         "config.HookConfig": {
             "type": "object",
@@ -3229,6 +3902,10 @@ const docTemplate = `{
                         }
                     ]
                 },
+                "sessionless": {
+                    "description": "Sessionless marks a server that does not maintain an MCP session (it\nnever issues a Mcp-Session-Id). When true, Crush omits the\ntools/prompts/resources list-changed handlers: the go-sdk opens a\nSEP-2575 \"subscriptions/listen\" stream whenever any of those handlers\nis set, and sessionless streamable-HTTP servers (e.g. GitHub MCP)\nanswer that POST with 404 (\"session not found\"), which the SDK treats\nas fatal. The cost is no live list-changed notifications from this\nserver.\n\nWhen nil, Crush auto-detects a set of known sessionless servers (see\nIsSessionless); set it explicitly to override that detection.",
+                    "type": "boolean"
+                },
                 "timeout": {
                     "type": "integer"
                 },
@@ -3257,6 +3934,64 @@ const docTemplate = `{
             "type": "object",
             "additionalProperties": {
                 "$ref": "#/definitions/config.MCPConfig"
+            }
+        },
+        "config.Optional-array_string": {
+            "type": "object",
+            "properties": {
+                "present": {
+                    "type": "boolean"
+                },
+                "value": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "config.Optional-bool": {
+            "type": "object",
+            "properties": {
+                "present": {
+                    "type": "boolean"
+                },
+                "value": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "config.Optional-int": {
+            "type": "object",
+            "properties": {
+                "present": {
+                    "type": "boolean"
+                },
+                "value": {
+                    "type": "integer"
+                }
+            }
+        },
+        "config.Optional-string": {
+            "type": "object",
+            "properties": {
+                "present": {
+                    "type": "boolean"
+                },
+                "value": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.Optional-time_Duration": {
+            "type": "object",
+            "properties": {
+                "present": {
+                    "type": "boolean"
+                },
+                "value": {
+                    "$ref": "#/definitions/time.Duration"
+                }
             }
         },
         "config.Permissions": {
@@ -3338,6 +4073,9 @@ const docTemplate = `{
                 "diff_mode": {
                     "type": "string"
                 },
+                "exit_banner": {
+                    "$ref": "#/definitions/config.ExitBanner"
+                },
                 "scrollbar": {
                     "type": "string"
                 },
@@ -3408,6 +4146,13 @@ const docTemplate = `{
             "properties": {
                 "$schema": {
                     "type": "string"
+                },
+                "agents": {
+                    "description": "AgentProfiles is the user-authored profile source, decoded from the\n\"agents\" config key. The Agents map above is derived state rebuilt by\nSetupAgents from built-ins plus these patches, so serializing a\nruntime config never writes generated defaults back into user files.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/config.AgentProfilePatch"
+                    }
                 },
                 "env": {
                     "description": "Env is a map of environment variables set on startup.",
@@ -3525,11 +4270,21 @@ const docTemplate = `{
                 "initialize_as": {
                     "type": "string"
                 },
+                "live_tasks_per_parent": {
+                    "type": "integer"
+                },
+                "live_tasks_per_workspace": {
+                    "type": "integer"
+                },
                 "notifications": {
                     "type": "string"
                 },
                 "progress": {
                     "type": "boolean"
+                },
+                "running_tasks_per_model": {
+                    "description": "RunningTasksPerModel caps concurrently running child tasks per\nprovider model. Unlike the live quotas it is never unlimited: an\nunset or non-positive value falls back to\nDefaultRunningTasksPerModel.",
+                    "type": "integer"
                 },
                 "skills_paths": {
                     "type": "array",
@@ -3561,6 +4316,9 @@ const docTemplate = `{
                 },
                 "id": {
                     "type": "string"
+                },
+                "is_summary_message": {
+                    "type": "boolean"
                 },
                 "model": {
                     "type": "string"
@@ -3653,6 +4411,17 @@ const docTemplate = `{
                 "APIKeyKindOAuth"
             ]
         },
+        "proto.AgentCancelAccepted": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string"
+                },
+                "task_id": {
+                    "type": "string"
+                }
+            }
+        },
         "proto.AgentInfo": {
             "type": "object",
             "properties": {
@@ -3667,6 +4436,10 @@ const docTemplate = `{
                 },
                 "model_cfg": {
                     "$ref": "#/definitions/config.SelectedModel"
+                },
+                "primary_agent": {
+                    "description": "PrimaryAgent is the canonical name of the profile the primary\nagent is currently running as. Empty until a primary agent is\ninitialized or explicitly selected.",
+                    "type": "string"
                 }
             }
         },
@@ -3686,6 +4459,14 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "session_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.AgentPrimaryRequest": {
+            "type": "object",
+            "properties": {
+                "profile": {
                     "type": "string"
                 }
             }
@@ -3753,6 +4534,40 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "mime_type": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.ChildMessageAccepted": {
+            "type": "object",
+            "properties": {
+                "attempt_task_id": {
+                    "type": "string"
+                },
+                "child_session_id": {
+                    "type": "string"
+                },
+                "sequence": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "task_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.ChildMessageRequest": {
+            "type": "object",
+            "properties": {
+                "attachments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.Attachment"
+                    }
+                },
+                "prompt": {
                     "type": "string"
                 }
             }
@@ -3847,6 +4662,9 @@ const docTemplate = `{
         "proto.Error": {
             "type": "object",
             "properties": {
+                "code": {
+                    "type": "string"
+                },
                 "message": {
                     "type": "string"
                 }
@@ -3898,6 +4716,35 @@ const docTemplate = `{
                 "token": {}
             }
         },
+        "proto.InboxEntry": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "delivered_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "owner_session_id": {
+                    "type": "string"
+                },
+                "payload": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "terminal_generation": {
+                    "type": "integer"
+                }
+            }
+        },
         "proto.LSPClientInfo": {
             "type": "object",
             "properties": {
@@ -3920,6 +4767,15 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "path": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.MCPAuthResponse": {
+            "type": "object",
+            "properties": {
+                "auth_url": {
+                    "description": "AuthURL is the OAuth authorization URL the user must visit, when\nthe flow is still in progress.",
                     "type": "string"
                 }
             }
@@ -3977,6 +4833,17 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.MCPPendingAuthServer": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "url": {
                     "type": "string"
                 }
             }
@@ -4066,6 +4933,35 @@ const docTemplate = `{
                 "System",
                 "Tool"
             ]
+        },
+        "proto.OutboxEntry": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "delivered_at": {
+                    "type": "string"
+                },
+                "event_type": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "payload": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "run_generation": {
+                    "type": "integer"
+                },
+                "task_id": {
+                    "type": "string"
+                }
+            }
         },
         "proto.PermissionAction": {
             "type": "string",
@@ -4169,6 +5065,72 @@ const docTemplate = `{
             "properties": {
                 "resolved": {
                     "type": "boolean"
+                }
+            }
+        },
+        "proto.QuestionChoice": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.QuestionItem": {
+            "type": "object",
+            "properties": {
+                "choices": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.QuestionChoice"
+                    }
+                },
+                "description": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "question": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.QuestionRequest": {
+            "type": "object",
+            "properties": {
+                "confirm_description": {
+                    "type": "string"
+                },
+                "confirm_title": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.QuestionItem"
+                    }
+                },
+                "session_id": {
+                    "type": "string"
+                },
+                "tool_call_id": {
+                    "type": "string"
                 }
             }
         },
@@ -4365,6 +5327,233 @@ const docTemplate = `{
                 },
                 "state": {
                     "$ref": "#/definitions/proto.SkillDiscoveryState"
+                }
+            }
+        },
+        "proto.TaskListResponse": {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.TaskSnapshot"
+                    }
+                }
+            }
+        },
+        "proto.TaskOutputResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "result": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "truncated": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "proto.TaskQuestion": {
+            "type": "object",
+            "properties": {
+                "answers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.TaskQuestionAnswer"
+                    }
+                },
+                "batch": {
+                    "$ref": "#/definitions/proto.QuestionRequest"
+                },
+                "child_session_id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "owner_session_id": {
+                    "type": "string"
+                },
+                "question_id": {
+                    "type": "string"
+                },
+                "resolution": {
+                    "type": "string"
+                },
+                "resolved_at": {
+                    "type": "string"
+                },
+                "run_generation": {
+                    "type": "integer"
+                },
+                "task_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.TaskQuestionAnswer": {
+            "type": "object",
+            "properties": {
+                "fill_in_text": {
+                    "type": "string"
+                },
+                "notes": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "question_id": {
+                    "type": "string"
+                },
+                "selected_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "yes": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "proto.TaskQuestionAnswerRequest": {
+            "type": "object",
+            "properties": {
+                "question_id": {
+                    "type": "string"
+                },
+                "responses": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.TaskQuestionAnswer"
+                    }
+                }
+            }
+        },
+        "proto.TaskQuestionCancelRequest": {
+            "type": "object",
+            "properties": {
+                "question_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.TaskQuestionListResponse": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.TaskQuestion"
+                    }
+                }
+            }
+        },
+        "proto.TaskQuestionResolutionResponse": {
+            "type": "object",
+            "properties": {
+                "resolved": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "proto.TaskResyncResponse": {
+            "type": "object",
+            "properties": {
+                "inbox": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.InboxEntry"
+                    }
+                },
+                "outbox": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.OutboxEntry"
+                    }
+                },
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.TaskQuestion"
+                    }
+                },
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.TaskSnapshot"
+                    }
+                }
+            }
+        },
+        "proto.TaskSnapshot": {
+            "type": "object",
+            "properties": {
+                "child_session_id": {
+                    "type": "string"
+                },
+                "completed_at": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "owner_session_id": {
+                    "type": "string"
+                },
+                "parent_message_id": {
+                    "type": "string"
+                },
+                "parent_session_id": {
+                    "type": "string"
+                },
+                "profile": {
+                    "type": "string"
+                },
+                "resolved_model": {
+                    "type": "string"
+                },
+                "resolved_provider": {
+                    "type": "string"
+                },
+                "result": {
+                    "type": "string"
+                },
+                "run_generation": {
+                    "type": "integer"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "tool_call_id": {
+                    "type": "string"
+                },
+                "truncated": {
+                    "type": "boolean"
                 }
             }
         },

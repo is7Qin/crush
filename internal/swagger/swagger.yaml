@@ -47,6 +47,45 @@ definitions:
       top_p:
         type: number
     type: object
+  config.AgentProfilePatch:
+    properties:
+      allowed_mcp:
+        type: object
+      allowed_tools:
+        $ref: '#/definitions/config.Optional-array_string'
+      can_ask_questions:
+        $ref: '#/definitions/config.Optional-bool'
+      can_delegate:
+        $ref: '#/definitions/config.Optional-bool'
+      context_paths:
+        $ref: '#/definitions/config.Optional-array_string'
+      denied_tools:
+        $ref: '#/definitions/config.Optional-array_string'
+      description:
+        $ref: '#/definitions/config.Optional-string'
+      disabled:
+        $ref: '#/definitions/config.Optional-bool'
+      max_duration:
+        $ref: '#/definitions/config.Optional-time_Duration'
+      max_steps:
+        $ref: '#/definitions/config.Optional-int'
+      model:
+        $ref: '#/definitions/config.Optional-string'
+      models:
+        $ref: '#/definitions/config.Optional-array_string'
+      name:
+        $ref: '#/definitions/config.Optional-string'
+      prompt_file:
+        $ref: '#/definitions/config.Optional-string'
+      reasoning_effort:
+        $ref: '#/definitions/config.Optional-string'
+      role:
+        $ref: '#/definitions/config.Optional-string'
+      skills:
+        $ref: '#/definitions/config.Optional-array_string'
+      system_prompt:
+        $ref: '#/definitions/config.Optional-string'
+    type: object
   config.Attribution:
     properties:
       co_authored_by:
@@ -63,6 +102,16 @@ definitions:
       max_items:
         type: integer
     type: object
+  config.ExitBanner:
+    enum:
+    - default
+    - compact
+    - none
+    type: string
+    x-enum-varnames:
+    - ExitBannerDefault
+    - ExitBannerCompact
+    - ExitBannerNone
   config.HookConfig:
     properties:
       command:
@@ -182,6 +231,20 @@ definitions:
         description: |-
           OAuthToken is the persisted OAuth token for this server. It is
           managed internally and stored in the global data config.
+      sessionless:
+        description: |-
+          Sessionless marks a server that does not maintain an MCP session (it
+          never issues a Mcp-Session-Id). When true, Crush omits the
+          tools/prompts/resources list-changed handlers: the go-sdk opens a
+          SEP-2575 "subscriptions/listen" stream whenever any of those handlers
+          is set, and sessionless streamable-HTTP servers (e.g. GitHub MCP)
+          answer that POST with 404 ("session not found"), which the SDK treats
+          as fatal. The cost is no live list-changed notifications from this
+          server.
+
+          When nil, Crush auto-detects a set of known sessionless servers (see
+          IsSessionless); set it explicitly to override that detection.
+        type: boolean
       timeout:
         type: integer
       type:
@@ -202,6 +265,43 @@ definitions:
   config.MCPs:
     additionalProperties:
       $ref: '#/definitions/config.MCPConfig'
+    type: object
+  config.Optional-array_string:
+    properties:
+      present:
+        type: boolean
+      value:
+        items:
+          type: string
+        type: array
+    type: object
+  config.Optional-bool:
+    properties:
+      present:
+        type: boolean
+      value:
+        type: boolean
+    type: object
+  config.Optional-int:
+    properties:
+      present:
+        type: boolean
+      value:
+        type: integer
+    type: object
+  config.Optional-string:
+    properties:
+      present:
+        type: boolean
+      value:
+        type: string
+    type: object
+  config.Optional-time_Duration:
+    properties:
+      present:
+        type: boolean
+      value:
+        $ref: '#/definitions/time.Duration'
     type: object
   config.Permissions:
     properties:
@@ -264,6 +364,8 @@ definitions:
         $ref: '#/definitions/config.Completions'
       diff_mode:
         type: string
+      exit_banner:
+        $ref: '#/definitions/config.ExitBanner'
       scrollbar:
         type: string
       transparent:
@@ -311,6 +413,15 @@ definitions:
     properties:
       $schema:
         type: string
+      agents:
+        additionalProperties:
+          $ref: '#/definitions/config.AgentProfilePatch'
+        description: |-
+          AgentProfiles is the user-authored profile source, decoded from the
+          "agents" config key. The Agents map above is derived state rebuilt by
+          SetupAgents from built-ins plus these patches, so serializing a
+          runtime config never writes generated defaults back into user files.
+        type: object
       env:
         additionalProperties:
           type: string
@@ -392,10 +503,21 @@ definitions:
         type: array
       initialize_as:
         type: string
+      live_tasks_per_parent:
+        type: integer
+      live_tasks_per_workspace:
+        type: integer
       notifications:
         type: string
       progress:
         type: boolean
+      running_tasks_per_model:
+        description: |-
+          RunningTasksPerModel caps concurrently running child tasks per
+          provider model. Unlike the live quotas it is never unlimited: an
+          unset or non-positive value falls back to
+          DefaultRunningTasksPerModel.
+        type: integer
       skills_paths:
         items:
           type: string
@@ -417,6 +539,8 @@ definitions:
         type: integer
       id:
         type: string
+      is_summary_message:
+        type: boolean
       model:
         type: string
       parts:
@@ -481,6 +605,13 @@ definitions:
     x-enum-varnames:
     - APIKeyKindString
     - APIKeyKindOAuth
+  proto.AgentCancelAccepted:
+    properties:
+      status:
+        type: string
+      task_id:
+        type: string
+    type: object
   proto.AgentInfo:
     properties:
       is_busy:
@@ -491,6 +622,12 @@ definitions:
         $ref: '#/definitions/catwalk.Model'
       model_cfg:
         $ref: '#/definitions/config.SelectedModel'
+      primary_agent:
+        description: |-
+          PrimaryAgent is the canonical name of the profile the primary
+          agent is currently running as. Empty until a primary agent is
+          initialized or explicitly selected.
+        type: string
     type: object
   proto.AgentMessage:
     properties:
@@ -503,6 +640,11 @@ definitions:
       run_id:
         type: string
       session_id:
+        type: string
+    type: object
+  proto.AgentPrimaryRequest:
+    properties:
+      profile:
         type: string
     type: object
   proto.AgentSession:
@@ -547,6 +689,28 @@ definitions:
       file_path:
         type: string
       mime_type:
+        type: string
+    type: object
+  proto.ChildMessageAccepted:
+    properties:
+      attempt_task_id:
+        type: string
+      child_session_id:
+        type: string
+      sequence:
+        type: integer
+      status:
+        type: string
+      task_id:
+        type: string
+    type: object
+  proto.ChildMessageRequest:
+    properties:
+      attachments:
+        items:
+          $ref: '#/definitions/proto.Attachment'
+        type: array
+      prompt:
         type: string
     type: object
   proto.ConfigCompactRequest:
@@ -607,6 +771,8 @@ definitions:
     type: object
   proto.Error:
     properties:
+      code:
+        type: string
       message:
         type: string
     type: object
@@ -640,6 +806,25 @@ definitions:
         type: boolean
       token: {}
     type: object
+  proto.InboxEntry:
+    properties:
+      created_at:
+        type: string
+      delivered_at:
+        type: string
+      id:
+        type: string
+      owner_session_id:
+        type: string
+      payload:
+        items:
+          type: integer
+        type: array
+      task_id:
+        type: string
+      terminal_generation:
+        type: integer
+    type: object
   proto.LSPClientInfo:
     properties:
       connected_at:
@@ -655,6 +840,14 @@ definitions:
   proto.LSPStartRequest:
     properties:
       path:
+        type: string
+    type: object
+  proto.MCPAuthResponse:
+    properties:
+      auth_url:
+        description: |-
+          AuthURL is the OAuth authorization URL the user must visit, when
+          the flow is still in progress.
         type: string
     type: object
   proto.MCPClientInfo:
@@ -692,6 +885,13 @@ definitions:
   proto.MCPNameRequest:
     properties:
       name:
+        type: string
+    type: object
+  proto.MCPPendingAuthServer:
+    properties:
+      name:
+        type: string
+      url:
         type: string
     type: object
   proto.MCPPrompt:
@@ -755,6 +955,25 @@ definitions:
     - User
     - System
     - Tool
+  proto.OutboxEntry:
+    properties:
+      created_at:
+        type: string
+      delivered_at:
+        type: string
+      event_type:
+        type: string
+      id:
+        type: string
+      payload:
+        items:
+          type: integer
+        type: array
+      run_generation:
+        type: integer
+      task_id:
+        type: string
+    type: object
   proto.PermissionAction:
     enum:
     - allow
@@ -823,6 +1042,49 @@ definitions:
     properties:
       resolved:
         type: boolean
+    type: object
+  proto.QuestionChoice:
+    properties:
+      description:
+        type: string
+      id:
+        type: string
+      label:
+        type: string
+    type: object
+  proto.QuestionItem:
+    properties:
+      choices:
+        items:
+          $ref: '#/definitions/proto.QuestionChoice'
+        type: array
+      description:
+        type: string
+      id:
+        type: string
+      label:
+        type: string
+      question:
+        type: string
+      type:
+        type: string
+    type: object
+  proto.QuestionRequest:
+    properties:
+      confirm_description:
+        type: string
+      confirm_title:
+        type: string
+      id:
+        type: string
+      questions:
+        items:
+          $ref: '#/definitions/proto.QuestionItem'
+        type: array
+      session_id:
+        type: string
+      tool_call_id:
+        type: string
     type: object
   proto.QuestionResponse:
     properties:
@@ -951,6 +1213,154 @@ definitions:
         type: string
       state:
         $ref: '#/definitions/proto.SkillDiscoveryState'
+    type: object
+  proto.TaskListResponse:
+    properties:
+      tasks:
+        items:
+          $ref: '#/definitions/proto.TaskSnapshot'
+        type: array
+    type: object
+  proto.TaskOutputResponse:
+    properties:
+      error:
+        type: string
+      result:
+        type: string
+      status:
+        type: string
+      summary:
+        type: string
+      task_id:
+        type: string
+      truncated:
+        type: boolean
+    type: object
+  proto.TaskQuestion:
+    properties:
+      answers:
+        items:
+          $ref: '#/definitions/proto.TaskQuestionAnswer'
+        type: array
+      batch:
+        $ref: '#/definitions/proto.QuestionRequest'
+      child_session_id:
+        type: string
+      created_at:
+        type: string
+      owner_session_id:
+        type: string
+      question_id:
+        type: string
+      resolution:
+        type: string
+      resolved_at:
+        type: string
+      run_generation:
+        type: integer
+      task_id:
+        type: string
+    type: object
+  proto.TaskQuestionAnswer:
+    properties:
+      fill_in_text:
+        type: string
+      notes:
+        additionalProperties:
+          type: string
+        type: object
+      question_id:
+        type: string
+      selected_ids:
+        items:
+          type: string
+        type: array
+      "yes":
+        type: boolean
+    type: object
+  proto.TaskQuestionAnswerRequest:
+    properties:
+      question_id:
+        type: string
+      responses:
+        items:
+          $ref: '#/definitions/proto.TaskQuestionAnswer'
+        type: array
+    type: object
+  proto.TaskQuestionCancelRequest:
+    properties:
+      question_id:
+        type: string
+    type: object
+  proto.TaskQuestionListResponse:
+    properties:
+      questions:
+        items:
+          $ref: '#/definitions/proto.TaskQuestion'
+        type: array
+    type: object
+  proto.TaskQuestionResolutionResponse:
+    properties:
+      resolved:
+        type: boolean
+    type: object
+  proto.TaskResyncResponse:
+    properties:
+      inbox:
+        items:
+          $ref: '#/definitions/proto.InboxEntry'
+        type: array
+      outbox:
+        items:
+          $ref: '#/definitions/proto.OutboxEntry'
+        type: array
+      questions:
+        items:
+          $ref: '#/definitions/proto.TaskQuestion'
+        type: array
+      tasks:
+        items:
+          $ref: '#/definitions/proto.TaskSnapshot'
+        type: array
+    type: object
+  proto.TaskSnapshot:
+    properties:
+      child_session_id:
+        type: string
+      completed_at:
+        type: string
+      created_at:
+        type: string
+      error:
+        type: string
+      id:
+        type: string
+      owner_session_id:
+        type: string
+      parent_message_id:
+        type: string
+      parent_session_id:
+        type: string
+      profile:
+        type: string
+      resolved_model:
+        type: string
+      resolved_provider:
+        type: string
+      result:
+        type: string
+      run_generation:
+        type: integer
+      started_at:
+        type: string
+      status:
+        type: string
+      summary:
+        type: string
+      tool_call_id:
+        type: string
+      truncated:
+        type: boolean
     type: object
   proto.Todo:
     properties:
@@ -1319,6 +1729,53 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Initialize agent
+      tags:
+      - agent
+  /workspaces/{id}/agent/primary:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      - description: Primary agent selection
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.AgentPrimaryRequest'
+      responses:
+        "200":
+          description: OK
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Set primary agent
       tags:
       - agent
   /workspaces/{id}/agent/sessions/{sid}:
@@ -2063,6 +2520,71 @@ paths:
       summary: Stop all LSP servers
       tags:
       - lsp
+  /workspaces/{id}/mcp/auth:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: MCP name request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.MCPNameRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.MCPAuthResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Authenticate an MCP server
+      tags:
+      - mcp
+  /workspaces/{id}/mcp/auth-url:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: MCP server name
+        in: query
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.MCPAuthResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Get MCP OAuth authorization URL
+      tags:
+      - mcp
   /workspaces/{id}/mcp/docker/disable:
     post:
       parameters:
@@ -2143,6 +2665,34 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Get MCP prompt
+      tags:
+      - mcp
+  /workspaces/{id}/mcp/pending-auth:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/proto.MCPPendingAuthServer'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Get MCP servers pending OAuth
       tags:
       - mcp
   /workspaces/{id}/mcp/prompts:
@@ -2990,4 +3540,261 @@ paths:
       summary: Read skill content
       tags:
       - skills
+  /workspaces/{id}/task-questions/answer:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      - description: Task question answer
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.TaskQuestionAnswerRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.TaskQuestionResolutionResponse'
+      summary: Answer task question
+      tags:
+      - questions
+  /workspaces/{id}/task-questions/cancel:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      - description: Task question cancellation
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.TaskQuestionCancelRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.TaskQuestionResolutionResponse'
+      summary: Cancel task question
+      tags:
+      - questions
+  /workspaces/{id}/task-questions/pending:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.TaskQuestionListResponse'
+      summary: List pending task questions
+      tags:
+      - questions
+  /workspaces/{id}/tasks:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      - description: Parent session filter (must equal the caller's current session)
+        in: query
+        name: parent_session_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.TaskListResponse'
+      summary: List caller tasks
+      tags:
+      - tasks
+  /workspaces/{id}/tasks/{tid}:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task ID
+        in: path
+        name: tid
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.TaskSnapshot'
+      summary: Get task
+      tags:
+      - tasks
+  /workspaces/{id}/tasks/{tid}/cancel:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task ID
+        in: path
+        name: tid
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.AgentCancelAccepted'
+      summary: Cancel task
+      tags:
+      - tasks
+  /workspaces/{id}/tasks/{tid}/messages:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task ID
+        in: path
+        name: tid
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      - description: Child message
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.ChildMessageRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/proto.ChildMessageAccepted'
+      summary: Send direct child message
+      tags:
+      - tasks
+  /workspaces/{id}/tasks/{tid}/output:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task ID
+        in: path
+        name: tid
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.TaskOutputResponse'
+      summary: Get task output
+      tags:
+      - tasks
+  /workspaces/{id}/tasks/resync:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Attached client ID (UUID)
+        in: query
+        name: client_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.TaskResyncResponse'
+      summary: Resync tasks
+      tags:
+      - tasks
 swagger: "2.0"
