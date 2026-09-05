@@ -288,8 +288,10 @@ func (a *sessionAgent) retryOption() fantasy.AgentOption {
 // completed the dispatch handoff in Run. Close is the only way to
 // release the reservation and is idempotent.
 type AcceptedRun struct {
-	agent     *sessionAgent
-	sessionID string
+	agent              *sessionAgent
+	sessionID          string
+	primaryCoordinator *coordinator
+	primaryAgent       SessionAgent
 	// seq is the monotonic accept sequence stamped by BeginAccepted. A
 	// cancel covers this handle iff seq is at or below the session's
 	// cancel mark, so a handle accepted after a cancel (higher seq) is
@@ -307,7 +309,12 @@ func (r *AcceptedRun) Close() {
 	if !r.done.CompareAndSwap(false, true) {
 		return
 	}
-	r.agent.endAccepted(r.sessionID)
+	if r.agent != nil {
+		r.agent.endAccepted(r.sessionID)
+	}
+	if r.primaryCoordinator != nil {
+		r.primaryCoordinator.endPrimaryRun()
+	}
 }
 
 // SessionID exposes the session this reservation is for so the run path

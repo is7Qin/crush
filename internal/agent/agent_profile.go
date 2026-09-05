@@ -42,7 +42,7 @@ func (c *coordinator) buildProfileAgent(ctx context.Context, name, requestModel 
 		return nil, config.ResolvedProfile{}, err
 	}
 
-	systemPrompt, err := c.profileSystemPrompt(ctx, prof, large)
+	systemPrompt, err := c.profileSystemPrompt(ctx, prof, large, false)
 	if err != nil {
 		return nil, config.ResolvedProfile{}, err
 	}
@@ -71,32 +71,58 @@ func (c *coordinator) buildProfileAgent(ctx context.Context, name, requestModel 
 }
 
 // buildProfileModels resolves the child's model pair, honoring the
-// profile's exact model override for the large model when configured.
+// profile's exact model override for the large model when configured. A
+// configured profile reasoning_effort overrides the large selection's own
+// effort; whether the model supports it is decided later by
+// effectiveReasoningEffort, which falls back to the model default instead
+// of sending an unsupported level.
 func (c *coordinator) buildProfileModels(ctx context.Context, prof config.ResolvedProfile) (Model, Model, error) {
-	if !prof.ModelSet {
-		return c.buildAgentModels(ctx, true)
+	var large, small Model
+	var err error
+	if prof.ModelSet {
+		large, err = c.buildModel(ctx, prof.Model, true)
+		if err != nil {
+			return Model{}, Model{}, err
+		}
+		smallCfg, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]
+		if !ok {
+			return Model{}, Model{}, errSmallModelNotSelected
+		}
+		small, err = c.buildModel(ctx, smallCfg, true)
+		if err != nil {
+			return Model{}, Model{}, err
+		}
+	} else {
+		large, small, err = c.buildAgentModels(ctx, true)
+		if err != nil {
+			return Model{}, Model{}, err
+		}
 	}
-	large, err := c.buildModel(ctx, prof.Model, true)
-	if err != nil {
-		return Model{}, Model{}, err
-	}
-	smallCfg, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]
-	if !ok {
-		return Model{}, Model{}, errSmallModelNotSelected
-	}
-	small, err := c.buildModel(ctx, smallCfg, true)
-	if err != nil {
-		return Model{}, Model{}, err
+	if prof.ReasoningEffort.Present {
+		large.ModelCfg.ReasoningEffort = prof.ReasoningEffort.Value
 	}
 	return large, small, nil
 }
 
-// profileSystemPrompt renders the child's system prompt: an inline profile
-// prompt is used verbatim, a prompt file is read from disk, and otherwise
-// the built-in template for the selected profile is rendered.
-func (c *coordinator) profileSystemPrompt(ctx context.Context, prof config.ResolvedProfile, large Model) (string, error) {
+const childPromptRestriction = `
+
+CHILD SESSION RESTRICTION: you are a child agent. You must not call
+call_agent or otherwise delegate work to another agent. Complete the assigned
+task with the tools available to you and report the result to the parent.`
+
+// profileSystemPrompt renders a profile's system prompt in one of two
+// explicit modes: primary prompts are returned unchanged; child prompts get
+// the child-only delegation restriction. A prompt file and the built-in
+// coder/task templates are returned unchanged in primary mode.
+func (c *coordinator) profileSystemPrompt(ctx context.Context, prof config.ResolvedProfile, large Model, primary bool) (string, error) {
+	withChildRestriction := func(prompt string) string {
+		if primary {
+			return prompt
+		}
+		return prompt + childPromptRestriction
+	}
 	if prof.SystemPrompt != "" {
-		return prof.SystemPrompt, nil
+		return withChildRestriction(prof.SystemPrompt), nil
 	}
 	if prof.PromptFile != "" {
 		path := filepathext.SmartJoin(c.cfg.WorkingDir(), prof.PromptFile)
@@ -104,7 +130,7 @@ func (c *coordinator) profileSystemPrompt(ctx context.Context, prof config.Resol
 		if err != nil {
 			return "", fmt.Errorf("read profile prompt file: %w", err)
 		}
-		return string(data), nil
+		return withChildRestriction(string(data)), nil
 	}
 
 	tmpl := taskPromptTmpl
@@ -115,5 +141,9 @@ func (c *coordinator) profileSystemPrompt(ctx context.Context, prof config.Resol
 	if err != nil {
 		return "", err
 	}
-	return p.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
+	rendered, err := p.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
+	if err != nil {
+		return "", err
+	}
+	return withChildRestriction(rendered), nil
 }

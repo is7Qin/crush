@@ -32,7 +32,7 @@ var agentToolDescription string
 // attempt; Model is an optional exact "provider/model" override that
 // replaces the profile's model selection.
 type AgentParams struct {
-	Profile string `json:"profile,omitempty" description:"Optional agent profile to run the task under: a built-in (coder, task) or a profile configured via the agents config key (default: coder with full ordinary capabilities)"`
+	Profile string `json:"profile,omitempty" description:"Optional agent profile to run the task under: a built-in (the Crush base agents coder or task, or the OMO-native roster: sisyphus, hephaestus, oracle, librarian, explore, multimodal-looker, prometheus, metis, momus, atlas, sisyphus-junior) or a profile configured via the agents config key, which patches the built-in of the same name (default: coder with full ordinary capabilities)"`
 	Prompt  string `json:"prompt" description:"The task for the agent to perform"`
 	Model   string `json:"model,omitempty" description:"Optional exact model override for the child as provider/model (e.g. mock/other-model). An unavailable model fails without fallback"`
 	TaskID  string `json:"task_id,omitempty" description:"Optional id of one of your own terminal call_agent tasks to continue: a new attempt runs against the retained child session with the current profile and model policy"`

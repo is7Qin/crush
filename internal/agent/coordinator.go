@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -62,6 +63,9 @@ var (
 	errLargeModelNotSelected      = errors.New("large model not selected")
 	errSmallModelNotSelected      = errors.New("small model not selected")
 	errModelNotFound              = errors.New("model not found in provider config")
+	// ErrPrimaryAgentBusy means a primary agent run or accepted dispatch is
+	// still in flight, so replacing the primary would race that work.
+	ErrPrimaryAgentBusy = errors.New("primary agent is busy")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -132,6 +136,8 @@ type Coordinator interface {
 	Summarize(context.Context, string) error
 	Model() Model
 	UpdateModels(ctx context.Context) error
+	SetPrimaryAgent(ctx context.Context, profile string) error
+	PrimaryAgent() string
 	GenerateTitle(ctx context.Context, sessionID, prompt string)
 }
 
@@ -198,8 +204,11 @@ type coordinator struct {
 	// wiring leaves it nil.
 	newFetchChild func(ctx context.Context, tmpDir string, spec agenticFetchChildSpec) (SessionAgent, error)
 
-	currentAgent SessionAgent
-	agents       map[string]SessionAgent
+	currentAgent   SessionAgent
+	agents         map[string]SessionAgent
+	primaryMu      sync.RWMutex
+	primaryProfile string
+	primaryRuns    int
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -270,23 +279,13 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		taskQuestions: opts.TaskQuestions,
 	}
 
-	agentCfg, ok := opts.Config.Config().Agents[config.AgentCoder]
-	if !ok {
-		return nil, errCoderAgentNotConfigured
-	}
-
-	// TODO: make this dynamic when we support multiple agents
-	prompt, err := coderPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
-	if err != nil {
-		return nil, err
-	}
-
-	agent, err := c.buildAgent(ctx, prompt, agentCfg, false)
+	agent, profile, err := c.buildPrimaryAgent(ctx, config.AgentCoder)
 	if err != nil {
 		return nil, err
 	}
 	c.currentAgent = agent
-	c.agents[config.AgentCoder] = agent
+	c.primaryProfile = profile.Name
+	c.agents[profile.Name] = agent
 	return c, nil
 }
 
@@ -306,6 +305,23 @@ func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sess
 // dispatchMu; when nil (the in-process/local path) no accept tracking
 // applies.
 func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+	var (
+		primary SessionAgent
+		release func()
+		err     error
+	)
+	if accept != nil && accept.primaryCoordinator == c {
+		primary = accept.primaryAgent
+		accept.primaryCoordinator = nil
+		release = c.endPrimaryRun
+	} else {
+		primary, release, err = c.beginPrimaryRun()
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer release()
+
 	if err := c.readyWg.Wait(); err != nil {
 		return nil, err
 	}
@@ -337,7 +353,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 		return nil, fmt.Errorf("failed to update models: %w", err)
 	}
 
-	model := c.currentAgent.Model()
+	model := primary.Model()
 	maxTokens := model.CatwalkCfg.DefaultMaxTokens
 	if model.ModelCfg.MaxTokens != 0 {
 		maxTokens = model.ModelCfg.MaxTokens
@@ -381,7 +397,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	// same correlator.
 	runID := RunIDFromContext(ctx)
 	run := func() (*fantasy.AgentResult, error) {
-		return c.currentAgent.Run(ctx, SessionAgentCall{
+		return primary.Run(ctx, SessionAgentCall{
 			SessionID:        sessionID,
 			RunID:            runID,
 			Prompt:           prompt,
@@ -1331,64 +1347,109 @@ func isExactoSupported(modelID string) bool {
 // so a cancel arriving before the run registers in activeRequests is not
 // lost.
 func (c *coordinator) BeginAccepted(sessionID string) *AcceptedRun {
-	return c.currentAgent.BeginAccepted(sessionID)
+	c.primaryMu.Lock()
+	primary := c.currentAgent
+	if primary != nil {
+		c.primaryRuns++
+	}
+	c.primaryMu.Unlock()
+	if primary == nil {
+		return nil
+	}
+	accept := primary.BeginAccepted(sessionID)
+	accept.primaryCoordinator = c
+	accept.primaryAgent = primary
+	return accept
 }
 
 func (c *coordinator) Cancel(sessionID string) {
-	c.currentAgent.Cancel(sessionID)
+	if primary, _ := c.primaryAgentSnapshot(); primary != nil {
+		primary.Cancel(sessionID)
+	}
 }
 
 func (c *coordinator) CancelAll() {
-	c.currentAgent.CancelAll()
+	if primary, _ := c.primaryAgentSnapshot(); primary != nil {
+		primary.CancelAll()
+	}
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
-	c.currentAgent.ClearQueue(sessionID)
+	if primary, _ := c.primaryAgentSnapshot(); primary != nil {
+		primary.ClearQueue(sessionID)
+	}
 }
 
 func (c *coordinator) IsBusy() bool {
-	return c.currentAgent.IsBusy()
+	c.primaryMu.RLock()
+	defer c.primaryMu.RUnlock()
+	return c.primaryBusyLocked()
 }
 
 func (c *coordinator) IsSessionBusy(sessionID string) bool {
-	return c.currentAgent.IsSessionBusy(sessionID)
+	if primary, _ := c.primaryAgentSnapshot(); primary != nil {
+		return primary.IsSessionBusy(sessionID)
+	}
+	return false
 }
 
 func (c *coordinator) Model() Model {
-	return c.currentAgent.Model()
+	if primary, _ := c.primaryAgentSnapshot(); primary != nil {
+		return primary.Model()
+	}
+	return Model{}
 }
 
 func (c *coordinator) UpdateModels(ctx context.Context) error {
-	// build the models again so we make sure we get the latest config
-	large, small, err := c.buildAgentModels(ctx, false)
+	c.primaryMu.RLock()
+	defer c.primaryMu.RUnlock()
+	primary := c.currentAgent
+	if primary == nil {
+		return errPrimaryAgentNotInitialized
+	}
+	profileName := c.primaryProfile
+	if profileName == "" {
+		profileName = config.AgentCoder
+	}
+	profile, err := c.cfg.Config().ResolvePrimaryAgentProfile(profileName)
 	if err != nil {
 		return err
 	}
-	c.currentAgent.SetModels(large, small)
-
-	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
-	if !ok {
-		return errCoderAgentNotConfigured
-	}
-
-	tools, err := c.buildTools(ctx, agentCfg, false)
+	large, small, err := c.buildPrimaryProfileModels(ctx, profile)
 	if err != nil {
 		return err
 	}
-	c.currentAgent.SetTools(tools)
+	agentTools, err := c.buildTools(ctx, profile.Agent, false)
+	if err != nil {
+		return err
+	}
+	primary.SetModels(large, small)
+	primary.SetTools(agentTools)
 	return nil
 }
 
 func (c *coordinator) QueuedPrompts(sessionID string) int {
-	return c.currentAgent.QueuedPrompts(sessionID)
+	if primary, _ := c.primaryAgentSnapshot(); primary != nil {
+		return primary.QueuedPrompts(sessionID)
+	}
+	return 0
 }
 
 func (c *coordinator) QueuedPromptsList(sessionID string) []string {
-	return c.currentAgent.QueuedPromptsList(sessionID)
+	if primary, _ := c.primaryAgentSnapshot(); primary != nil {
+		return primary.QueuedPromptsList(sessionID)
+	}
+	return nil
 }
 
 func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
-	providerCfg, ok := c.cfg.Config().Providers.Get(c.currentAgent.Model().ModelCfg.Provider)
+	primary, release, err := c.beginPrimaryRun()
+	if err != nil {
+		return err
+	}
+	defer release()
+	model := primary.Model()
+	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
 		return errModelProviderNotConfigured
 	}
@@ -1399,15 +1460,16 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 
 	// Auth failures during summarize flow through fantasy's OnAuthRefresh,
 	// the same path used by regular turns.
-	return c.currentAgent.Summarize(ctx, sessionID, getProviderOptions(c.currentAgent.Model(), providerCfg), c.makeAuthRefreshCallback(providerCfg))
+	return primary.Summarize(ctx, sessionID, getProviderOptions(model, providerCfg), c.makeAuthRefreshCallback(providerCfg))
 }
 
 // GenerateTitle generates a session title using the current agent.
 func (c *coordinator) GenerateTitle(ctx context.Context, sessionID, prompt string) {
-	if c.currentAgent == nil {
+	primary, _ := c.primaryAgentSnapshot()
+	if primary == nil {
 		return
 	}
-	c.currentAgent.GenerateTitle(ctx, sessionID, prompt)
+	primary.GenerateTitle(ctx, sessionID, prompt)
 }
 
 // refreshTokenIfExpired proactively refreshes the OAuth token if it has expired.
