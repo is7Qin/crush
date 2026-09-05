@@ -153,6 +153,12 @@ func TestTaskControl_ListParentFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 
+	// The caller naming itself as the parent is accepted and returns
+	// the same owner-scoped snapshot list (the switcher's read).
+	same, err := tc.List(context.Background(), "owner", "owner")
+	require.NoError(t, err)
+	require.Equal(t, tasks, same)
+
 	// A parent filter naming another session is rejected outright.
 	_, err = tc.List(context.Background(), "owner", "someone-else")
 	require.ErrorIs(t, err, ErrTaskForbidden)

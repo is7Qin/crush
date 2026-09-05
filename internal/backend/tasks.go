@@ -53,31 +53,13 @@ var (
 // that client's current-session binding. Bodies never carry authority
 // fields; this is the only source of task ownership over the wire.
 func (b *Backend) ClientCurrentSession(workspaceID, clientID string) (string, error) {
-	if _, err := validateClientID(clientID); err != nil {
+	ws, err := b.attachedWorkspace(workspaceID, clientID)
+	if err != nil {
 		return "", err
 	}
-	b.mu.Lock()
-	_, retired := b.retired[clientID]
-	b.mu.Unlock()
-	if retired {
-		return "", ErrClientRetired
-	}
-	ws, ok := b.workspaces.Get(workspaceID)
-	if !ok {
-		return "", ErrWorkspaceNotFound
-	}
 	ws.clientsMu.Lock()
-	cs, attached := ws.clients[clientID]
-	sessionID := ""
-	if attached && cs.streams > 0 {
-		sessionID = cs.currentSessionID
-	} else {
-		attached = false
-	}
+	sessionID := ws.clients[clientID].currentSessionID
 	ws.clientsMu.Unlock()
-	if !attached {
-		return "", ErrClientNotAttached
-	}
 	if sessionID == "" {
 		return "", ErrClientSessionRequired
 	}

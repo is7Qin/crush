@@ -917,6 +917,39 @@ func (b *Backend) DeleteWorkspace(id, clientID string) error {
 	return b.releaseHold(id, clientID)
 }
 
+// attachedWorkspace resolves workspaceID and verifies that clientID
+// names a non-retired client with at least one live stream attached to
+// the workspace. It is the shared authentication seam for routes that
+// must act as an attached client (task ownership derivation,
+// primary-agent switching). The workspace is returned so callers can
+// act on it without a second lookup.
+func (b *Backend) attachedWorkspace(workspaceID, clientID string) (*Workspace, error) {
+	if _, err := validateClientID(clientID); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	_, retired := b.retired[clientID]
+	b.mu.Unlock()
+	if retired {
+		return nil, ErrClientRetired
+	}
+	ws, ok := b.workspaces.Get(workspaceID)
+	if !ok {
+		return nil, ErrWorkspaceNotFound
+	}
+	ws.clientsMu.Lock()
+	cs, attached := ws.clients[clientID]
+	if attached && cs.streams == 0 {
+		// Hold-only (no live stream): not attached.
+		attached = false
+	}
+	ws.clientsMu.Unlock()
+	if !attached {
+		return nil, ErrClientNotAttached
+	}
+	return ws, nil
+}
+
 // SetCurrentSession records which session the given client is
 // currently viewing within the workspace. Passing an empty sessionID
 // clears the client's current-session entry (e.g. the client has

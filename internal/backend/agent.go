@@ -132,13 +132,31 @@ func (b *Backend) GetAgentInfo(workspaceID string) (proto.AgentInfo, error) {
 	if ws.AgentCoordinator != nil {
 		m := ws.AgentCoordinator.Model()
 		agentInfo = proto.AgentInfo{
-			Model:    m.CatwalkCfg,
-			ModelCfg: m.ModelCfg,
-			IsBusy:   ws.AgentCoordinator.IsBusy(),
-			IsReady:  true,
+			Model:        m.CatwalkCfg,
+			ModelCfg:     m.ModelCfg,
+			IsBusy:       ws.AgentCoordinator.IsBusy(),
+			IsReady:      true,
+			PrimaryAgent: ws.AgentCoordinator.PrimaryAgent(),
 		}
 	}
 	return agentInfo, nil
+}
+
+// SetPrimaryAgent switches the workspace's runtime primary agent to the
+// named profile after authenticating that clientID names an attached
+// client of the workspace. The switch is in-memory only: no config is
+// persisted, no session is created or loaded, and a failed switch
+// (busy, unknown, or disabled profile) leaves the current primary agent
+// and every client's session binding untouched.
+func (b *Backend) SetPrimaryAgent(ctx context.Context, workspaceID, clientID, profile string) error {
+	ws, err := b.attachedWorkspace(workspaceID, clientID)
+	if err != nil {
+		return err
+	}
+	if ws.AgentCoordinator == nil {
+		return ErrAgentNotInitialized
+	}
+	return ws.AgentCoordinator.SetPrimaryAgent(ctx, profile)
 }
 
 // InitAgent initializes the coder agent for the workspace.
