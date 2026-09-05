@@ -78,6 +78,10 @@ type ConnectionEvent struct {
 	// recovery attempts. The loop keeps retrying regardless; the UI
 	// should escalate from a transient notice to a persistent error.
 	Stuck bool
+	// TaskResync carries the durable task recovery read made before a
+	// recovered event is sent. It includes task snapshots, mailbox rows,
+	// and pending task questions for the attached current session.
+	TaskResync *proto.TaskResyncResponse
 }
 
 // LSPClientInfo holds information about an LSP client's state. This is
@@ -162,6 +166,17 @@ type Workspace interface {
 	InitCoderAgent(ctx context.Context) error
 	InitCoderAgentNonInteractive(ctx context.Context) error
 	GetDefaultSmallModel(providerID string) config.SelectedModel
+	// SetPrimaryAgent switches the workspace's runtime primary agent to
+	// the named profile. The selection is in-memory only (never
+	// persisted), leaves the current session untouched, and keeps the
+	// existing agent active when the switch fails (busy, unknown, or
+	// disabled profile).
+	SetPrimaryAgent(ctx context.Context, profile string) error
+	// PrimaryAgent returns the canonical name of the profile the
+	// workspace's primary agent is currently running as. It is empty
+	// when no primary agent is initialized or, in client mode, when the
+	// status fetch fails.
+	PrimaryAgent() string
 
 	// Permissions
 	//

@@ -330,6 +330,18 @@ func (w *ClientWorkspace) InitCoderAgentNonInteractive(ctx context.Context) erro
 	return w.client.InitiateAgentProcessing(ctx, w.workspaceID(), false)
 }
 
+func (w *ClientWorkspace) SetPrimaryAgent(ctx context.Context, profile string) error {
+	return w.client.SetPrimaryAgent(ctx, w.workspaceID(), profile)
+}
+
+func (w *ClientWorkspace) PrimaryAgent() string {
+	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
+	if err != nil {
+		return ""
+	}
+	return info.PrimaryAgent
+}
+
 func (w *ClientWorkspace) GetDefaultSmallModel(providerID string) config.SelectedModel {
 	model, err := w.client.GetDefaultSmallModel(context.Background(), w.workspaceID(), providerID)
 	if err != nil {
@@ -1051,12 +1063,21 @@ func (w *ClientWorkspace) afterReconnect(send func(tea.Msg)) {
 	w.mu.RLock()
 	sid := w.lastSession
 	w.mu.RUnlock()
+	var resync *proto.TaskResyncResponse
 	if sid != "" {
 		if err := w.SetCurrentSession(w.subCtx, sid); err != nil {
 			slog.Warn("Failed to re-assert current session after reconnect", "error", err)
 		}
+		response, err := w.TaskResync(w.subCtx)
+		if err != nil {
+			if w.subCtx.Err() == nil {
+				slog.Warn("Failed to resync tasks after reconnect", "error", err)
+			}
+		} else {
+			resync = &response
+		}
 	}
-	send(ConnectionEvent{State: ConnectionRecovered})
+	send(ConnectionEvent{State: ConnectionRecovered, TaskResync: resync})
 }
 
 // sleepOrDone waits for d or until the subscription context is

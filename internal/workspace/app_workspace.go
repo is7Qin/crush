@@ -265,6 +265,17 @@ func (w *AppWorkspace) GetDefaultSmallModel(providerID string) config.SelectedMo
 	return w.app.GetDefaultSmallModel(providerID)
 }
 
+func (w *AppWorkspace) SetPrimaryAgent(ctx context.Context, profile string) error {
+	return w.app.SetPrimaryAgent(ctx, profile)
+}
+
+func (w *AppWorkspace) PrimaryAgent() string {
+	if w.app.AgentCoordinator == nil {
+		return ""
+	}
+	return w.app.AgentCoordinator.PrimaryAgent()
+}
+
 // -- Permissions --
 
 func (w *AppWorkspace) PermissionGrant(perm permission.PermissionRequest) bool {

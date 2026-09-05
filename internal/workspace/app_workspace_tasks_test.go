@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/task"
 	"github.com/charmbracelet/crush/internal/agent/taskquestion"
 	"github.com/charmbracelet/crush/internal/app"
+	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/google/uuid"
@@ -63,6 +64,15 @@ func TestAppWorkspace_TaskControlLocalMode(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	require.Equal(t, rec.ID, list[0].ID)
+
+	// The parent filter naming the current session matches the
+	// unfiltered read (local parity with the server-validated route);
+	// any other parent is rejected.
+	filtered, err := w.TaskList(ctx, "owner")
+	require.NoError(t, err)
+	require.Equal(t, list, filtered)
+	_, err = w.TaskList(ctx, "someone-else")
+	require.ErrorIs(t, err, backend.ErrTaskForbidden)
 
 	snap, err := w.TaskGet(ctx, rec.ID)
 	require.NoError(t, err)
