@@ -3,14 +3,22 @@ package task
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// Limits bounds live task quota and running-model capacity. Zero
-// values fall back to the spec defaults.
+// DefaultRunningPerModel bounds concurrently running attempts per
+// (provider, model) capacity key when the configured value is not
+// positive. Model capacity is always finite so the FIFO queue keeps
+// its backpressure; live-task quotas are the configurable limits.
+const DefaultRunningPerModel = 10
+
+// Limits bounds live task quota and running-model capacity.
+// Non-positive live limits mean unlimited; a non-positive
+// RunningPerModel falls back to DefaultRunningPerModel.
 type Limits struct {
 	LiveTasksPerParent    int
 	LiveTasksPerWorkspace int
@@ -19,13 +27,13 @@ type Limits struct {
 
 func (l *Limits) applyDefaults() {
 	if l.LiveTasksPerParent <= 0 {
-		l.LiveTasksPerParent = 4
+		l.LiveTasksPerParent = math.MaxInt
 	}
 	if l.LiveTasksPerWorkspace <= 0 {
-		l.LiveTasksPerWorkspace = 8
+		l.LiveTasksPerWorkspace = math.MaxInt
 	}
 	if l.RunningPerModel <= 0 {
-		l.RunningPerModel = 4
+		l.RunningPerModel = DefaultRunningPerModel
 	}
 }
 
