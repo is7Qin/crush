@@ -307,8 +307,8 @@ func DefaultKeyMap() KeyMap {
 		key.WithHelp("ctrl+b", "subagents"),
 	)
 	km.Chat.ReturnToParent = key.NewBinding(
-		key.WithKeys("ctrl+shift+b"),
-		key.WithHelp("ctrl+shift+b", "parent session"),
+		key.WithKeys("ctrl+shift+b", "ctrl+]"),
+		key.WithHelp("ctrl+]", "parent session"),
 	)
 	km.Initialize.Yes = key.NewBinding(
 		key.WithKeys("y", "Y"),

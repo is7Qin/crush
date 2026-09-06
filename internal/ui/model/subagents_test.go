@@ -196,7 +196,7 @@ func TestRefreshSubagentsCmdOnlyWhenDialogOpen(t *testing.T) {
 }
 
 func returnToParentKey() tea.KeyPressMsg {
-	return tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl | tea.ModShift}
+	return tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl}
 }
 
 func helpAdvertisesParentSession(t *testing.T, u *UI) bool {
