@@ -66,6 +66,7 @@ type KeyMap struct {
 		ScrollRight    key.Binding
 		FocusSidebar   key.Binding
 		FocusChat      key.Binding
+		Subagents      key.Binding
 	}
 
 	Initialize struct {
@@ -299,6 +300,10 @@ func DefaultKeyMap() KeyMap {
 	km.Chat.FocusChat = key.NewBinding(
 		key.WithKeys("h", "left"),
 		key.WithHelp("h/←", "focus chat"),
+	)
+	km.Chat.Subagents = key.NewBinding(
+		key.WithKeys("ctrl+b"),
+		key.WithHelp("ctrl+b", "subagents"),
 	)
 	km.Initialize.Yes = key.NewBinding(
 		key.WithKeys("y", "Y"),

@@ -2510,6 +2510,11 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 			return true
+		case key.Matches(msg, m.keyMap.Chat.Subagents) && m.hasSession():
+			if cmd := m.openSubagentsDialog(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return true
 		case key.Matches(msg, m.keyMap.Chat.Details) && m.isCompact:
 			m.detailsOpen = !m.detailsOpen
 			m.updateLayoutAndSize()
@@ -2632,6 +2637,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	case uiChat, uiLanding:
 		switch m.focus {
 		case uiFocusEditor:
+			if key.Matches(msg, m.keyMap.Chat.Subagents) && m.hasSession() {
+				if cmd := m.openSubagentsDialog(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return tea.Batch(cmds...)
+			}
 			// Handle completions if open.
 			if m.completionsOpen {
 				if msg, ok := m.completions.Update(msg); ok {
@@ -2881,6 +2892,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			}
 		case uiFocusMain:
 			switch {
+			case key.Matches(msg, m.keyMap.Chat.Subagents) && m.hasSession():
+				if cmd := m.openSubagentsDialog(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			case key.Matches(msg, m.keyMap.Tab):
 				m.focus = uiFocusEditor
 				m.sidebarScrollbarVisible = false
@@ -3392,7 +3407,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			k.ToggleYolo,
 		)
 		if hasSession {
-			mainBinds = append(mainBinds, k.Chat.NewSession, k.Chat.EndFollow)
+			mainBinds = append(mainBinds, k.Chat.NewSession, k.Chat.Subagents, k.Chat.EndFollow)
 		}
 
 		binds = append(binds, mainBinds)

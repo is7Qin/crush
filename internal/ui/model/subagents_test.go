@@ -6,9 +6,11 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
 	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/stretchr/testify/require"
@@ -19,11 +21,14 @@ import (
 // session load.
 type subagentsTestWorkspace struct {
 	workspace.Workspace
+	cfg         *config.Config
 	tasks       []proto.TaskSnapshot
 	listErr     error
 	taskListCtx context.Context
 	loadedID    string
 }
+
+func (w *subagentsTestWorkspace) Config() *config.Config { return w.cfg }
 
 func (w *subagentsTestWorkspace) TaskList(ctx context.Context, parentSessionID string) ([]proto.TaskSnapshot, error) {
 	w.taskListCtx = ctx
@@ -110,6 +115,31 @@ func TestOpenSubagentsDialogListsViaAuthorizedTaskRead(t *testing.T) {
 	// Re-opening from the palette raises and refreshes the same dialog.
 	cmd2 := u.openSubagentsDialog()
 	require.NotNil(t, cmd2)
+}
+
+func TestCtrlBOpensSubagentsForActiveSession(t *testing.T) {
+	ws := &subagentsTestWorkspace{cfg: agentsTestConfig()}
+	u := newTestUIWithWorkspace(ws)
+	u.session = &session.Session{ID: "parent-1"}
+	u.attachments = attachments.New(nil, attachments.Keymap{})
+	u.focus = uiFocusMain
+	u.keyMap = DefaultKeyMap()
+
+	cmd := u.handleKeyPressMsg(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+
+	require.True(t, u.dialog.ContainsDialog(dialog.SubagentsID))
+	require.NotNil(t, cmd)
+}
+
+func TestCtrlBDoesNotOpenSubagentsWithoutSession(t *testing.T) {
+	u := newTestUIWithWorkspace(&subagentsTestWorkspace{cfg: agentsTestConfig()})
+	u.attachments = attachments.New(nil, attachments.Keymap{})
+	u.focus = uiFocusMain
+	u.keyMap = DefaultKeyMap()
+
+	u.handleKeyPressMsg(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+
+	require.False(t, u.dialog.ContainsDialog(dialog.SubagentsID))
 }
 
 func TestSubagentsFetchErrorIsRoutedToDialog(t *testing.T) {
