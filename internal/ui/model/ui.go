@@ -2515,6 +2515,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 			return true
+		case key.Matches(msg, m.keyMap.Chat.ReturnToParent) && m.session != nil && m.session.ParentSessionID != "":
+			cmds = append(cmds, m.loadSession(m.session.ParentSessionID))
+			return true
 		case key.Matches(msg, m.keyMap.Chat.Details) && m.isCompact:
 			m.detailsOpen = !m.detailsOpen
 			m.updateLayoutAndSize()
@@ -3408,6 +3411,9 @@ func (m *UI) FullHelp() [][]key.Binding {
 		)
 		if hasSession {
 			mainBinds = append(mainBinds, k.Chat.NewSession, k.Chat.Subagents, k.Chat.EndFollow)
+			if m.session.ParentSessionID != "" {
+				mainBinds = append(mainBinds, k.Chat.ReturnToParent)
+			}
 		}
 
 		binds = append(binds, mainBinds)

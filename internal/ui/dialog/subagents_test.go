@@ -156,3 +156,63 @@ func TestSubagentsStatusStates(t *testing.T) {
 	})
 	require.Empty(t, dialog.statusMessage())
 }
+
+func TestSubagentsSetTasksShowsAllWhenQueryEmpty(t *testing.T) {
+	t.Parallel()
+
+	dialog := newSubagentsDialogForTest(t)
+	tasks := []proto.TaskSnapshot{
+		taskSnapshot("t1", "child-1", "coder", "First", "running", "model-a"),
+		taskSnapshot("t2", "child-2", "task", "Second", "completed", "model-b"),
+	}
+	dialog.SetTasks(tasks)
+	require.Empty(t, dialog.input.Value())
+	require.Len(t, dialog.list.FilteredItems(), 2)
+
+	// A stale list-level filter must not survive a refresh with no query.
+	dialog.list.SetFilter("zzz-stale-filter")
+	require.Empty(t, dialog.list.FilteredItems())
+
+	dialog.SetTasks(tasks)
+	require.Empty(t, dialog.input.Value())
+	require.Len(t, dialog.list.FilteredItems(), 2)
+	require.Empty(t, dialog.statusMessage())
+}
+
+func TestSubagentsFilterMatchesStatus(t *testing.T) {
+	t.Parallel()
+
+	dialog := newSubagentsDialogForTest(t)
+	dialog.SetTasks([]proto.TaskSnapshot{
+		taskSnapshot("t1", "child-1", "coder", "First", "running", "model-a"),
+		taskSnapshot("t2", "child-2", "task", "Second", "completed", "model-b"),
+	})
+
+	running := &SubagentItem{snapshot: taskSnapshot("t1", "child-1", "coder", "First", "running", "model-a")}
+	require.Contains(t, running.Filter(), "running")
+
+	dialog.list.SetFilter("running")
+	items := dialog.list.FilteredItems()
+	require.Len(t, items, 1)
+	require.Equal(t, "t1", items[0].(*SubagentItem).ID())
+}
+
+func TestSubagentsNoMatchMessage(t *testing.T) {
+	t.Parallel()
+
+	dialog := newSubagentsDialogForTest(t)
+	dialog.SetTasks([]proto.TaskSnapshot{
+		taskSnapshot("t1", "child-1", "coder", "First", "running", ""),
+	})
+	dialog.input.SetValue("zzz-no-such-task")
+	dialog.list.SetFilter("zzz-no-such-task")
+	require.Equal(t, "No subagent tasks match the filter.", dialog.statusMessage())
+}
+
+func TestSubagentsRenderShowsStatus(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+	item := &SubagentItem{snapshot: taskSnapshot("t1", "child-1", "coder", "First", "running", "model-a"), t: &sty}
+	require.Contains(t, item.Render(80), "[running]")
+}

@@ -194,3 +194,71 @@ func TestRefreshSubagentsCmdOnlyWhenDialogOpen(t *testing.T) {
 	u.openSubagentsDialog()
 	require.NotNil(t, u.refreshSubagentsCmd())
 }
+
+func returnToParentKey() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl | tea.ModShift}
+}
+
+func helpAdvertisesParentSession(t *testing.T, u *UI) bool {
+	t.Helper()
+	for _, row := range u.FullHelp() {
+		for _, b := range row {
+			if b.Help().Desc == "parent session" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestReturnToParentLoadsParentSession(t *testing.T) {
+	ws := &subagentsTestWorkspace{cfg: agentsTestConfig()}
+	u := newTestUIWithWorkspace(ws)
+	u.session = &session.Session{ID: "child-1", ParentSessionID: "parent-1"}
+	u.attachments = attachments.New(nil, attachments.Keymap{})
+	u.focus = uiFocusMain
+	u.keyMap = DefaultKeyMap()
+
+	cmd := u.handleKeyPressMsg(returnToParentKey())
+	require.NotNil(t, cmd)
+
+	var loaded loadSessionMsg
+	for _, msg := range runCmd(t, cmd) {
+		if l, ok := msg.(loadSessionMsg); ok {
+			loaded = l
+		}
+	}
+	require.NotNil(t, loaded.session)
+	require.Equal(t, "parent-1", loaded.session.ID)
+	require.Equal(t, "parent-1", ws.loadedID)
+}
+
+func TestReturnToParentAdvertisedOnlyWithParent(t *testing.T) {
+	ws := &subagentsTestWorkspace{cfg: agentsTestConfig()}
+	u := newTestUIWithWorkspace(ws)
+	u.attachments = attachments.New(nil, attachments.Keymap{})
+	u.focus = uiFocusMain
+	u.keyMap = DefaultKeyMap()
+
+	u.session = &session.Session{ID: "s1"}
+	require.False(t, helpAdvertisesParentSession(t, u))
+
+	u.session = &session.Session{ID: "child-1", ParentSessionID: "parent-1"}
+	require.True(t, helpAdvertisesParentSession(t, u))
+}
+
+func TestReturnToParentWithoutParentLoadsNothing(t *testing.T) {
+	ws := &subagentsTestWorkspace{cfg: agentsTestConfig()}
+	u := newTestUIWithWorkspace(ws)
+	u.session = &session.Session{ID: "s1"}
+	u.attachments = attachments.New(nil, attachments.Keymap{})
+	u.focus = uiFocusMain
+	u.keyMap = DefaultKeyMap()
+
+	cmd := u.handleKeyPressMsg(returnToParentKey())
+	for _, msg := range runCmd(t, cmd) {
+		_, isLoad := msg.(loadSessionMsg)
+		require.False(t, isLoad, "no parent must not trigger a session load")
+	}
+	require.Empty(t, ws.loadedID)
+}

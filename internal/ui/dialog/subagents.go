@@ -107,9 +107,9 @@ func (s *Subagents) SetTasks(tasks []proto.TaskSnapshot) {
 	s.loading = false
 	s.fetchErr = ""
 	s.list.SetItems(subagentItems(s.com.Styles, tasks)...)
-	if query := s.input.Value(); query != "" {
-		s.list.SetFilter(query)
-	}
+	// Always re-apply the current query (even when empty) so a stale
+	// list-level filter can never hide rows after a refresh.
+	s.list.SetFilter(s.input.Value())
 	if index := s.indexOfTask(selectedID); index >= 0 {
 		s.list.SetSelected(index)
 	} else {
@@ -150,6 +150,8 @@ func (s *Subagents) statusMessage() string {
 		return "Failed to load subagents: " + strings.Join(strings.Fields(s.fetchErr), " ")
 	case len(s.list.FilteredItems()) == 0 && s.input.Value() == "":
 		return "No subagent tasks."
+	case len(s.list.FilteredItems()) == 0:
+		return "No subagent tasks match the filter."
 	}
 	return ""
 }
@@ -358,9 +360,9 @@ func (s *SubagentItem) title() string {
 	return "task " + s.snapshot.ID
 }
 
-// Filter returns the profile, title, and model for fuzzy matching.
+// Filter returns the status, profile, title, and model for fuzzy matching.
 func (s *SubagentItem) Filter() string {
-	return s.snapshot.Profile + " " + s.title() + " " + s.snapshot.Model
+	return s.snapshot.Status + " " + s.snapshot.Profile + " " + s.title() + " " + s.snapshot.Model
 }
 
 // InfoText returns the resolved model for the secondary column. The

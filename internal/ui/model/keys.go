@@ -67,6 +67,7 @@ type KeyMap struct {
 		FocusSidebar   key.Binding
 		FocusChat      key.Binding
 		Subagents      key.Binding
+		ReturnToParent key.Binding
 	}
 
 	Initialize struct {
@@ -304,6 +305,10 @@ func DefaultKeyMap() KeyMap {
 	km.Chat.Subagents = key.NewBinding(
 		key.WithKeys("ctrl+b"),
 		key.WithHelp("ctrl+b", "subagents"),
+	)
+	km.Chat.ReturnToParent = key.NewBinding(
+		key.WithKeys("ctrl+shift+b"),
+		key.WithHelp("ctrl+shift+b", "parent session"),
 	)
 	km.Initialize.Yes = key.NewBinding(
 		key.WithKeys("y", "Y"),
