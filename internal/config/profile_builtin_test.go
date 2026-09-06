@@ -19,11 +19,10 @@ var rosterNames = []string{
 	AgentMomus, AgentAtlas, AgentSisyphusJunior,
 }
 
-// readOnlyRoster are the research roles restricted to the read-only set;
-// the rest are coding roles with the coder palette.
-var readOnlyRoster = []string{
-	AgentOracle, AgentLibrarian, AgentExplore,
-	AgentMultimodalLooker, AgentPrometheus, AgentMetis, AgentMomus,
+// researchRoster can inspect repositories through shell/git but cannot edit;
+// multimodal-looker is the only strict read-only profile.
+var researchRoster = []string{
+	AgentOracle, AgentLibrarian, AgentExplore, AgentMetis, AgentMomus,
 }
 
 func TestResolveAgentProfile_RosterResolvesWithoutConfig(t *testing.T) {
@@ -65,19 +64,25 @@ func TestResolveAgentProfile_RosterToolPolicy(t *testing.T) {
 	for _, name := range rosterNames {
 		prof, err := cfg.ResolveAgentProfile(name)
 		require.NoError(t, err)
-		isReadOnly := slices.Contains(readOnlyRoster, name)
+		isResearch := slices.Contains(researchRoster, name)
 
-		if isReadOnly {
+		if name == AgentMultimodalLooker {
+			assert.Equal(t, []string{"view"}, prof.Agent.AllowedTools)
+			continue
+		}
+
+		if isResearch {
 			assert.Contains(t, prof.Agent.AllowedTools, "view", "profile %s", name)
 			assert.Contains(t, prof.Agent.AllowedTools, "fetch", "profile %s", name)
-			for _, forbidden := range []string{"bash", "edit", "write", "multiedit", "todos"} {
+			assert.Contains(t, prof.Agent.AllowedTools, "bash", "profile %s", name)
+			for _, forbidden := range []string{"edit", "write", "multiedit", "todos"} {
 				assert.False(t, slices.Contains(prof.Agent.AllowedTools, forbidden),
-					"read-only profile %s must not carry %s", name, forbidden)
+					"research profile %s must not carry %s", name, forbidden)
 			}
-			assert.NotNil(t, prof.Agent.AllowedMCP, "read-only profile %s gets no MCPs", name)
-			assert.Empty(t, prof.Agent.AllowedMCP, "read-only profile %s gets no MCPs", name)
-			assert.False(t, prof.CanDelegate, "read-only profile %s never delegates", name)
-			assert.False(t, prof.CanAskQuestions, "read-only profile %s never blocks on questions", name)
+			assert.NotNil(t, prof.Agent.AllowedMCP, "research profile %s gets no MCPs", name)
+			assert.Empty(t, prof.Agent.AllowedMCP, "research profile %s gets no MCPs", name)
+			assert.False(t, prof.CanDelegate, "research profile %s never delegates", name)
+			assert.False(t, prof.CanAskQuestions, "research profile %s never blocks on questions", name)
 			continue
 		}
 
@@ -129,7 +134,7 @@ func TestResolveAgentProfile_RosterUserOverridePrecedence(t *testing.T) {
 		assert.Equal(t, "gpt-4o-mini", prof.Model.Model)
 		// Inherited built-in policy: still read-only, still no delegation.
 		assert.Contains(t, prof.Agent.AllowedTools, "view")
-		assert.False(t, slices.Contains(prof.Agent.AllowedTools, "bash"))
+		assert.Contains(t, prof.Agent.AllowedTools, "bash")
 	})
 
 	t.Run("explicit empty system_prompt clears the built-in prompt", func(t *testing.T) {

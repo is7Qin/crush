@@ -38,23 +38,19 @@ func BuiltinAgentProfileNames() []string {
 	}
 }
 
-// extraHiddenTools are removed from the research allow-list so a read-only
-// roster profile sees exactly its palette: no primary-workspace introspection
-// or logs, and no job control for background jobs a child cannot start.
-// The delegation pair is stripped separately by the resolver for every
-// child.
+// extraHiddenTools are removed from the research allow-list because these
+// tools inspect or control the primary workspace rather than the child's
+// assigned research task.
 var extraHiddenTools = []string{
 	"crush_info", "crush_logs", "job_output", "job_kill",
 }
 
-// researchAllowedTools is the existing read-only set plus read-safe lookups
-// the research roles need (web fetch, cross-repo search, LSP references and
-// diagnostics), with the primary-only extras above removed. The result is
-// used as an allow-list, so it composes with workspace-disabled tools:
-// anything the user disabled is filtered out again at projection time.
+// researchAllowedTools preserves shell access for repository inspection while
+// excluding mutation and workspace-control tools. Child recursion tools are
+// stripped separately by the resolver.
 func researchAllowedTools() []string {
 	ro := resolveReadOnlyTools(allToolNames())
-	withLookups := append(slices.Clone(ro), "fetch", "lsp_references", "lsp_diagnostics")
+	withLookups := append(slices.Clone(ro), "bash", "fetch", "lsp_references", "lsp_diagnostics")
 	return filterSlice(withLookups, extraHiddenTools, false)
 }
 
@@ -83,6 +79,17 @@ func researchPatch(description, prompt string) AgentProfilePatch {
 	}
 }
 
+func mediaPatch(description, prompt string) AgentProfilePatch {
+	return AgentProfilePatch{
+		Description:     Some(description),
+		SystemPrompt:    Some(prompt),
+		AllowedTools:    Some([]string{"view"}),
+		AllowedMCP:      Some(map[string][]string{}),
+		CanDelegate:     Some(false),
+		CanAskQuestions: Some(false),
+	}
+}
+
 // builtinAgentProfiles is the pure-data built-in roster. Prompts are
 // inline (no template variables) so a resolved child uses them verbatim;
 // every field is overridable by a user patch of the same key. The
@@ -105,10 +112,10 @@ func builtinAgentProfiles() map[string]AgentProfilePatch {
 		AgentExplore: researchPatch(
 			"Codebase navigator: fast, broad search that returns exact file and line locations.",
 			explorePrompt),
-		AgentMultimodalLooker: researchPatch(
+		AgentMultimodalLooker: mediaPatch(
 			"Media inspector: reads images and PDFs given as paths and reports what they actually contain.",
 			multimodalLookerPrompt),
-		AgentPrometheus: researchPatch(
+		AgentPrometheus: coderLikePatch(
 			"Strategic planning consultant: explores the codebase first, then writes one decision-complete work plan with the real forks surfaced.",
 			prometheusPrompt),
 		AgentMetis: researchPatch(

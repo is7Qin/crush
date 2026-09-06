@@ -117,11 +117,12 @@ func TestResolvePrimaryAgentProfile_UsesCoderPalette(t *testing.T) {
 	assert.Empty(t, oracleChild.Agent.AllowedMCP,
 		"the research child still carries its no-MCP policy")
 	for _, tool := range []string{
-		"bash", "edit", "write", DelegationToolName, agenticFetchToolName, "agent_status",
+		"edit", "write", DelegationToolName, agenticFetchToolName, "agent_status",
 	} {
 		assert.False(t, slices.Contains(oracleChild.Agent.AllowedTools, tool),
 			"child oracle never sees %s", tool)
 	}
+	assert.Contains(t, oracleChild.Agent.AllowedTools, "bash")
 	narrowChild, err := cfg.ResolveAgentProfile("narrow")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"view"}, narrowChild.Agent.AllowedTools,

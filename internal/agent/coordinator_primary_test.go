@@ -183,9 +183,10 @@ func TestCoordinator_SetPrimaryAgent_researchProfileGetsCoderPalette(t *testing.
 	require.NoError(t, err)
 	childNames := toolNames(child.(*sessionAgent).tools.Copy())
 	assertNoDelegation(t, childNames)
-	for _, name := range []string{"agent_status", "agent_output", "agent_list", "agent_cancel", "agent_message", "bash", "edit"} {
+	for _, name := range []string{"agent_status", "agent_output", "agent_list", "agent_cancel", "agent_message", "edit"} {
 		assert.NotContains(t, childNames, name)
 	}
+	assert.Contains(t, childNames, "bash")
 	assert.Contains(t, childNames, "view")
 }
 

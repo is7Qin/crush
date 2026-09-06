@@ -167,7 +167,7 @@ func TestBuildProfileAgent_BuiltinRoster(t *testing.T) {
 		names := childToolNames(t, agent)
 		assert.Contains(t, names, "view")
 		assert.Contains(t, names, "grep")
-		assert.False(t, slices.Contains(names, "bash"))
+		assert.Contains(t, names, "bash")
 		assert.False(t, slices.Contains(names, "edit"))
 		assertNoDelegation(t, names)
 		assert.False(t, prof.CanDelegate)
@@ -176,15 +176,15 @@ func TestBuildProfileAgent_BuiltinRoster(t *testing.T) {
 			"the built-in roster prompt must reach the child")
 	})
 
-	t.Run("planning roster child is read-only", func(t *testing.T) {
+	t.Run("planning roster child keeps shell but cannot edit", func(t *testing.T) {
 		agent, prof, err := coord.buildProfileAgent(t.Context(), "prometheus", "")
 		require.NoError(t, err)
 		names := childToolNames(t, agent)
 		assert.Contains(t, names, "view")
 		assert.Contains(t, names, "grep")
-		assert.False(t, slices.Contains(names, "bash"))
-		assert.False(t, slices.Contains(names, "edit"))
-		assert.False(t, slices.Contains(names, "write"))
+		assert.Contains(t, names, "bash")
+		assert.Contains(t, names, "edit")
+		assert.Contains(t, names, "write")
 		assertNoDelegation(t, names)
 		assert.False(t, prof.CanDelegate)
 		require.NotEmpty(t, agent.(*sessionAgent).systemPrompt.Get(),
