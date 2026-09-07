@@ -420,8 +420,27 @@ func (s *SubagentItem) Render(width int) string {
 		InfoTextBlurred: s.t.Dialog.ListItem.InfoBlurred,
 		InfoTextFocused: s.t.Dialog.ListItem.InfoFocused,
 	}
-	title := fmt.Sprintf("[%s] %s · %s", s.snapshot.Status, s.snapshot.Profile, s.title())
+	title := fmt.Sprintf("[%s] %s · %s", displayTaskStatus(s.snapshot.Status), s.snapshot.Profile, s.title())
 	return renderItem(sty, title, info, s.focused, width, s.cache, &s.m)
+}
+
+func displayTaskStatus(status string) string {
+	switch status {
+	case "pending":
+		return "queued"
+	case "waiting_for_input":
+		return "waiting for input"
+	case "completed":
+		return "completed"
+	case "failed":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
+	case "interrupted":
+		return "interrupted"
+	default:
+		return status
+	}
 }
 
 // subagentItems converts task snapshots into list items.

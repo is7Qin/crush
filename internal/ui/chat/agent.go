@@ -66,8 +66,24 @@ func (a *AgentToolMessageItem) SetTaskState(s TaskState) {
 		return
 	}
 	a.task = s
+	if status, ok := terminalToolStatus(s.Status); ok {
+		a.SetStatus(status)
+	}
 	a.clearCache()
 	a.Bump()
+}
+
+func terminalToolStatus(status string) (ToolStatus, bool) {
+	switch status {
+	case "completed":
+		return ToolStatusSuccess, true
+	case "failed":
+		return ToolStatusError, true
+	case "cancelled", "interrupted":
+		return ToolStatusCanceled, true
+	default:
+		return ToolStatusRunning, false
+	}
 }
 
 // TaskState returns the most recent task fact mirrored on this item.

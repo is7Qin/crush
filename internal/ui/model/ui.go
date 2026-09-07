@@ -1059,6 +1059,20 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.refreshSubagentsCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		if msg.Payload.Task != nil && msg.Payload.Task.Status.Terminal() && m.session != nil && msg.Payload.Task.OwnerSessionID == m.session.ID {
+			message := msg.Payload.Task.Summary
+			if msg.Payload.Task.Err != "" {
+				message = msg.Payload.Task.Err
+			}
+			status := string(msg.Payload.Task.Status)
+			if status == "cancelled" {
+				status = "canceled"
+			}
+			cmds = append(cmds, m.sendNotification(notification.Notification{
+				Title:   "Subagent " + status,
+				Message: message,
+			}))
+		}
 	case subagentsFetchMsg:
 		m.applySubagentsFetch(msg)
 	case currentAgentMsg:
