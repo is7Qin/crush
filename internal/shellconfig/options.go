@@ -146,6 +146,9 @@ func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, s
 			return usage(stderr, fmt.Sprintf("option: %s requires a value", key))
 		}
 		n, err := strconv.Atoi(val)
+		if err != nil && key == "request-timeout" {
+			return usage(stderr, fmt.Sprintf("option: %s expects a number of seconds, got %q", key, val))
+		}
 		if err != nil || n < 0 {
 			return usage(stderr, fmt.Sprintf("option: %s expects a non-negative integer, got %q", key, val))
 		}
