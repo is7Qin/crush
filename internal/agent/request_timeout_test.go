@@ -142,13 +142,13 @@ func TestRequestTimeoutModel_ActiveStreamSurvives(t *testing.T) {
 	require.Equal(t, 6, parts)
 }
 
-// blockingModel blocks until the context is done and then returns the
+// timeoutBlockingModel blocks until the context is done and then returns the
 // context error, the way a hung provider request would.
-type blockingModel struct {
+type timeoutBlockingModel struct {
 	fakeLanguageModel
 }
 
-func (b *blockingModel) Generate(ctx context.Context, _ fantasy.Call) (*fantasy.Response, error) {
+func (b *timeoutBlockingModel) Generate(ctx context.Context, _ fantasy.Call) (*fantasy.Response, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -156,7 +156,7 @@ func (b *blockingModel) Generate(ctx context.Context, _ fantasy.Call) (*fantasy.
 func TestRequestTimeoutModel_GenerateReportsTimeout(t *testing.T) {
 	t.Parallel()
 
-	m := newRequestTimeoutModel(&blockingModel{}, 10*time.Millisecond)
+	m := newRequestTimeoutModel(&timeoutBlockingModel{}, 10*time.Millisecond)
 
 	_, err := m.Generate(t.Context(), fantasy.Call{})
 	require.Error(t, err)
@@ -197,7 +197,7 @@ func TestRequestTimeoutModel_StreamReportsTimeout(t *testing.T) {
 func TestRequestTimeoutModel_ParentCancelPassesThrough(t *testing.T) {
 	t.Parallel()
 
-	m := newRequestTimeoutModel(&blockingModel{}, 5*time.Minute)
+	m := newRequestTimeoutModel(&timeoutBlockingModel{}, 5*time.Minute)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

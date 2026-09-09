@@ -103,6 +103,7 @@ func (c *coordinator) buildProfileSessionAgent(ctx context.Context, prof config.
 		SystemPrompt:         systemPrompt,
 		IsSubAgent:           !primary,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
+		MaxRetries:           c.cfg.Config().Options.MaxRetries,
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,

@@ -1029,8 +1029,7 @@ func (c *coordinator) buildModel(ctx context.Context, sel config.SelectedModel, 
 	// providers fail instead of blocking a session forever. The wrapper is
 	// applied per request, so retries get a fresh budget each attempt.
 	requestTimeout := c.cfg.Config().Options.GetRequestTimeout()
-	largeModel = newRequestTimeoutModel(largeModel, requestTimeout)
-	smallModel = newRequestTimeoutModel(smallModel, requestTimeout)
+	languageModel = newRequestTimeoutModel(languageModel, requestTimeout)
 
 	return Model{
 		Model:      languageModel,
