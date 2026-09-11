@@ -36,6 +36,10 @@ func (c *blockingCoordinator) Run(ctx context.Context, sessionID, prompt string,
 	return nil, nil
 }
 
+func (c *blockingCoordinator) Continue(context.Context, string) (*fantasy.AgentResult, error) {
+	return nil, nil
+}
+
 func (c *blockingCoordinator) RunAccepted(ctx context.Context, accept *agent.AcceptedRun, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	c.runCount.Add(1)
 	select {
