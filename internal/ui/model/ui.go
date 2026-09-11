@@ -1043,7 +1043,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleQuestionNotification(msg.Payload)
 	case pubsub.Event[taskquestion.TaskQuestion]:
 		m.openTaskQuestionDialog(msg.Payload)
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.chat.ScrollToBottom(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		if cmd := m.sendNotification(notification.Notification{
