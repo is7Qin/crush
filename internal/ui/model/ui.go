@@ -4347,6 +4347,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	common.StartTurn()
 
 	var cmds []tea.Cmd
+	var sessionReady tea.Cmd
 	if !m.hasSession() {
 		newSession, err := m.com.Workspace.CreateSession(context.Background(), "New Session")
 		if err != nil {
@@ -4358,18 +4359,20 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 		if newSession.ID != "" {
 			m.session = &newSession
 			cmds = append(cmds, m.loadSession(newSession.ID))
+			sessionReady = m.reportCurrentSession(newSession.ID)
 		}
 		m.setState(uiChat, m.focus)
 	}
 
 	ctx := context.Background()
-	cmds = append(cmds, func() tea.Msg {
+	fileTracking := func() tea.Msg {
 		for _, path := range m.sessionFileReads {
 			m.com.Workspace.FileTrackerRecordRead(ctx, m.session.ID, path)
 			m.com.Workspace.LSPStart(ctx, path)
 		}
 		return nil
-	})
+	}
+	cmds = append(cmds, fileTracking)
 
 	// Capture session ID to avoid race with main goroutine updating m.session.
 	sessionID := m.session.ID
@@ -4382,7 +4385,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	m.agentBusyCache.set(true)
 	m.busyFetchGen++
 	m.invalidatePromptQueue()
-	cmds = append(cmds, func() tea.Msg {
+	agentRun := func() tea.Msg {
 		// AgentRun is fire-and-forget: it returns once the prompt has
 		// been accepted (HTTP 202) or synchronously with a validation
 		// or transport error. Run failures and cancellation surface
@@ -4395,7 +4398,12 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 			}
 		}
 		return agentRunSubmittedMsg{}
-	})
+	}
+	if sessionReady != nil {
+		cmds = append(cmds, tea.Sequence(sessionReady, agentRun))
+	} else {
+		cmds = append(cmds, agentRun)
+	}
 	return tea.Batch(cmds...)
 }
 
