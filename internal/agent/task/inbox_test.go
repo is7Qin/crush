@@ -129,6 +129,30 @@ func TestInboxDrainer_DeliversAndAcksAfterCommit(t *testing.T) {
 	require.Len(t, writer.snapshot(), 1)
 }
 
+func TestInboxDrainer_ContinuesParentAfterAck(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := NewMemoryStore()
+	terminalInbox(t, s, "t1", "child-1", "owner")
+	gate := &fakeGate{}
+	gate.ready.Store(true)
+	writer := &fakeWriter{}
+	var continued atomic.Int64
+
+	d := NewInboxDrainer(s, gate, writer, func(context.Context, string) error {
+		continued.Add(1)
+		return nil
+	})
+	n, err := d.Drain(ctx, "owner")
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Equal(t, int64(1), continued.Load())
+	require.Empty(t, func() []*InboxEntry {
+		entries, _ := s.ListInbox(ctx, "owner")
+		return entries
+	}())
+}
+
 func TestInboxDrainer_BusyParentKeepsRowsPending(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()

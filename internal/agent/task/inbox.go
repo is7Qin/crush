@@ -170,13 +170,16 @@ type ResultWriter interface {
 }
 
 // InboxDrainer delivers durable parent inbox rows into owner
-// sessions. Drain is serialized per parent session, never starts an
-// agent run, and stamps delivered_at only after the result message
-// commit succeeds. A not-ready parent keeps its rows pending.
+// sessions. Drain is serialized per parent session and stamps
+// delivered_at only after the result message commit succeeds. A
+// not-ready parent keeps its rows pending. When a continuation is
+// configured it runs after each ack, outside the per-parent lock, so
+// a long model turn cannot block other drains.
 type InboxDrainer struct {
-	store  Store
-	gate   ParentGate
-	writer ResultWriter
+	store          Store
+	gate           ParentGate
+	writer         ResultWriter
+	continueParent func(context.Context, string) error
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -184,8 +187,12 @@ type InboxDrainer struct {
 
 // NewInboxDrainer returns a drainer over store delivering through
 // gate and writer.
-func NewInboxDrainer(store Store, gate ParentGate, writer ResultWriter) *InboxDrainer {
-	return &InboxDrainer{store: store, gate: gate, writer: writer, locks: map[string]*sync.Mutex{}}
+func NewInboxDrainer(store Store, gate ParentGate, writer ResultWriter, continuation ...func(context.Context, string) error) *InboxDrainer {
+	var continueParent func(context.Context, string) error
+	if len(continuation) > 0 {
+		continueParent = continuation[0]
+	}
+	return &InboxDrainer{store: store, gate: gate, writer: writer, continueParent: continueParent, locks: map[string]*sync.Mutex{}}
 }
 
 // Drain delivers ownerSessionID's pending inbox rows and returns how
@@ -225,6 +232,9 @@ func (d *InboxDrainer) Drain(ctx context.Context, ownerSessionID string) (int, e
 // returning 0 with no error when the parent is not ready. A write
 // failure stops the parent's drain with its rows retained; earlier
 // rows stay delivered because each was acked after its commit.
+// Continuations run after the lock is released so model turns do not
+// block concurrent drains; ack already happened, so a crash between
+// ack and continuation replays at most one extra continuation.
 func (d *InboxDrainer) drainOwner(ctx context.Context, owner string) (int, error) {
 	d.mu.Lock()
 	lock, ok := d.locks[owner]
@@ -235,29 +245,40 @@ func (d *InboxDrainer) drainOwner(ctx context.Context, owner string) (int, error
 	d.mu.Unlock()
 
 	lock.Lock()
-	defer lock.Unlock()
-
 	ready, err := d.gate.ParentReady(ctx, owner)
 	if err != nil || !ready {
+		lock.Unlock()
 		return 0, err
 	}
 	entries, err := d.store.ListInbox(ctx, owner)
 	if err != nil {
+		lock.Unlock()
 		return 0, err
 	}
 	delivered := 0
 	for _, e := range entries {
 		env, err := e.Envelope()
 		if err != nil {
+			lock.Unlock()
 			return delivered, err
 		}
 		if err := d.writer.WriteResult(ctx, owner, env); err != nil {
+			lock.Unlock()
 			return delivered, err
 		}
 		if err := d.store.AckInbox(ctx, []string{e.ID}, time.Now()); err != nil {
+			lock.Unlock()
 			return delivered, err
 		}
 		delivered++
+	}
+	continuations := delivered
+	lock.Unlock()
+
+	for i := 0; i < continuations && d.continueParent != nil; i++ {
+		if err := d.continueParent(ctx, owner); err != nil {
+			return delivered, err
+		}
 	}
 	return delivered, nil
 }
