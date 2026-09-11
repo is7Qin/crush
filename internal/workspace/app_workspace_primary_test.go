@@ -32,6 +32,10 @@ func (c *fakePrimaryCoordinator) Run(context.Context, string, string, ...message
 	return nil, nil
 }
 
+func (c *fakePrimaryCoordinator) Continue(context.Context, string) (*fantasy.AgentResult, error) {
+	return nil, nil
+}
+
 func (c *fakePrimaryCoordinator) RunAccepted(context.Context, *agent.AcceptedRun, string, string, ...message.Attachment) (*fantasy.AgentResult, error) {
 	return nil, nil
 }
