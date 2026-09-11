@@ -76,6 +76,9 @@ var (
 
 type SessionAgentCall struct {
 	SessionID string
+	// Continue resumes a turn from already-persisted session messages without
+	// creating another user message.
+	Continue bool
 	// RunID, when non-empty, is the caller-supplied correlator that
 	// gets echoed back on the notify.RunComplete event emitted for
 	// this turn. It is preserved when the call is enqueued behind a
@@ -535,7 +538,7 @@ func (a *sessionAgent) canceledBySeq(sessionID string, seq uint64) bool {
 func (a *sessionAgent) persistCanceledTurn(ctx context.Context, call SessionAgentCall, userMsgCreated bool) error {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if !userMsgCreated {
+	if !userMsgCreated && !call.Continue {
 		if _, err := a.createUserMessage(writeCtx, call); err != nil {
 			return err
 		}
@@ -581,7 +584,7 @@ func (a *sessionAgent) publishRunComplete(ctx context.Context, call SessionAgent
 // (e.g. backend.SendMessage) can apply the same checks and keep the error
 // contract consistent.
 func ValidateCall(call SessionAgentCall) error {
-	if call.Prompt == "" && !message.ContainsTextAttachment(call.Attachments) {
+	if !call.Continue && call.Prompt == "" && !message.ContainsTextAttachment(call.Attachments) {
 		return ErrEmptyPrompt
 	}
 	if call.SessionID == "" {
@@ -732,17 +735,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// can take tens of seconds. Blocking Run on it delays the
 	// response to the caller. Use a detached context so the title
 	// goroutine survives Run's cancel.
-	if !hasUserTextMessage(msgs) {
+	if !call.Continue && !hasUserTextMessage(msgs) {
 		titleCtx := context.WithoutCancel(ctx)
 		go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
 	}
 
 	// Add the user message to the session.
-	_, err = a.createUserMessage(ctx, call)
-	if err != nil {
-		return nil, err
+	if !call.Continue {
+		_, err = a.createUserMessage(ctx, call)
+		if err != nil {
+			return nil, err
+		}
+		userMsgCreated = true
 	}
-	userMsgCreated = true
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
@@ -864,6 +869,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			fold, canceledRunIDs := a.drainQueueForStep(call.SessionID)
 			a.publishCanceledQueueDrops(canceledRunIDs)
 			for _, queued := range fold {
+				if queued.Continue {
+					continue
+				}
 				userMessage, createErr := a.createUserMessage(callContext, queued)
 				if createErr != nil {
 					return callContext, prepared, createErr

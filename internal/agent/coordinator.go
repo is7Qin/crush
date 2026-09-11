@@ -42,6 +42,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"charm.land/fantasy/providers/anthropic"
@@ -117,6 +118,7 @@ type Coordinator interface {
 	// INFO: (kujtim) this is not used yet we will use this when we have multiple agents
 	// SetMainAgent(string)
 	Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
+	Continue(ctx context.Context, sessionID string) (*fantasy.AgentResult, error)
 	// RunAccepted runs a call that was already accepted via
 	// BeginAccepted on the fire-and-forget dispatch path. The handle is
 	// the only carrier of accept-state across the backend.runAgent /
@@ -291,12 +293,19 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
-	return c.run(ctx, nil, sessionID, prompt, attachments...)
+	return c.run(ctx, nil, sessionID, prompt, false, attachments...)
+}
+
+func (c *coordinator) Continue(ctx context.Context, sessionID string) (*fantasy.AgentResult, error) {
+	if RunIDFromContext(ctx) == "" {
+		ctx = WithRunID(ctx, "continue-"+uuid.NewString())
+	}
+	return c.run(ctx, nil, sessionID, "Review the latest background agent result and continue the task.", true)
 }
 
 // RunAccepted implements Coordinator.
 func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
-	return c.run(ctx, accept, sessionID, prompt, attachments...)
+	return c.run(ctx, accept, sessionID, prompt, false, attachments...)
 }
 
 // run is the shared implementation behind Run and RunAccepted. When
@@ -304,7 +313,7 @@ func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sess
 // Accepted so sessionAgent.Run can consume the accept reservation under
 // dispatchMu; when nil (the in-process/local path) no accept tracking
 // applies.
-func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, continuation bool, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	var (
 		primary SessionAgent
 		release func()
@@ -399,6 +408,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	run := func() (*fantasy.AgentResult, error) {
 		return primary.Run(ctx, SessionAgentCall{
 			SessionID:        sessionID,
+			Continue:         continuation,
 			RunID:            runID,
 			Prompt:           prompt,
 			Attachments:      attachments,
