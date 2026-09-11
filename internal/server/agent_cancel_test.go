@@ -46,6 +46,10 @@ func newRunCoordinator(returnFn func(ctx context.Context) error) *runCoordinator
 	}
 }
 
+func (s *runCoordinator) Continue(context.Context, string) (*fantasy.AgentResult, error) {
+	return nil, nil
+}
+
 func (s *runCoordinator) Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	s.mu.Lock()
 	s.gotCtx = ctx
