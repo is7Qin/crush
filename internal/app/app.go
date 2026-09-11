@@ -197,6 +197,13 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		app.taskManager.Store(),
 		taskParentGate{sessions: sessions, app: app},
 		taskResultWriter{messages: messages},
+		func(ctx context.Context, owner string) error {
+			if app.AgentCoordinator == nil {
+				return nil
+			}
+			_, err := app.AgentCoordinator.Continue(ctx, owner)
+			return err
+		},
 	)
 	// Bridge lifecycle events onto the task event stream and drain the
 	// owner's durable mailbox on every terminalization. Registered
