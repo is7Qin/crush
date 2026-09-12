@@ -731,6 +731,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
 
+	// Repair tool calls orphaned by interrupted turns before doing
+	// anything else: without persisted results their UI rows spin
+	// forever while the backend has nothing to cancel. Fail open —
+	// the in-memory synthetic injection below still unblocks the
+	// provider even if this write fails.
+	if healed, healErr := a.healOrphanedToolCalls(ctx, call.SessionID, msgs); healErr != nil {
+		slog.Warn("Failed to heal orphaned tool calls", "session_id", call.SessionID, "error", healErr)
+	} else if healed > 0 {
+		slog.Info("Healed orphaned tool calls", "session_id", call.SessionID, "count", healed)
+		if msgs, err = a.getSessionMessages(ctx, currentSession); err != nil {
+			return nil, fmt.Errorf("failed to re-list messages after healing orphans: %w", err)
+		}
+	}
+
 	// Generate title from the first real (non-shell) user prompt.
 	// can take tens of seconds. Blocking Run on it delays the
 	// response to the caller. Use a detached context so the title
@@ -1045,6 +1059,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					toolResult,
 				},
 			})
+			// Fantasy ignores this return value and proceeds with the
+			// in-memory result, so a failed write would silently
+			// orphan the tool call (forever spinner, healed next
+			// turn). Log loudly here; the heal path covers recovery.
+			if createMsgErr != nil {
+				slog.Error("Failed to persist tool result message",
+					"session_id", currentAssistant.SessionID,
+					"tool_call_id", result.ToolCallID,
+					"error", createMsgErr)
+			}
 			return createMsgErr
 		},
 		OnStepFinish: func(stepResult fantasy.StepResult) error {
@@ -1744,6 +1768,14 @@ func filterOrphanedToolResults(m message.Message, knownToolCallIDs map[string]st
 	return msg, true
 }
 
+// orphanedToolResultText is the terminal result recorded for a tool
+// call whose real result was never persisted (interrupted turn,
+// restart, or a dropped write). The in-memory synthetic injected by
+// syntheticToolResultsForOrphanedCalls and the persisted repair row
+// written by healOrphanedToolCalls share it so the UI row and the
+// model see the same story.
+const orphanedToolResultText = "tool call was interrupted and did not produce a result, you may retry this call if the result is still needed"
+
 // syntheticToolResultsForOrphanedCalls returns a tool message containing
 // synthetic tool results for any tool calls in the assistant message that
 // have no matching result in knownToolResultIDs. LLM APIs require every
@@ -1765,7 +1797,7 @@ func syntheticToolResultsForOrphanedCalls(m message.Message, knownToolResultIDs 
 		syntheticParts = append(syntheticParts, fantasy.ToolResultPart{
 			ToolCallID: tc.ID,
 			Output: fantasy.ToolResultOutputContentError{
-				Error: errors.New("tool call was interrupted and did not produce a result, you may retry this call if the result is still needed"),
+				Error: errors.New(orphanedToolResultText),
 			},
 		})
 	}
@@ -1776,6 +1808,54 @@ func syntheticToolResultsForOrphanedCalls(m message.Message, knownToolResultIDs 
 		Role:    fantasy.MessageRoleTool,
 		Content: syntheticParts,
 	}, true
+}
+
+// healOrphanedToolCalls persists terminal error results for tool
+// calls that have no persisted result, and returns how many rows it
+// wrote. A persisted ToolCall with no ToolResult renders as a
+// forever spinner: the in-memory synthetic injected by
+// syntheticToolResultsForOrphanedCalls keeps the provider happy but
+// never touches the UI row, and ESC cannot clear it because the
+// backend is not stuck. Healing is idempotent — a later turn sees
+// the written results and writes nothing.
+func (a *sessionAgent) healOrphanedToolCalls(ctx context.Context, sessionID string, msgs []message.Message) (int, error) {
+	known := make(map[string]struct{})
+	for _, m := range msgs {
+		if m.Role != message.Tool {
+			continue
+		}
+		for _, tr := range m.ToolResults() {
+			known[tr.ToolCallID] = struct{}{}
+		}
+	}
+	var parts []message.ContentPart
+	for _, m := range msgs {
+		if m.Role != message.Assistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls() {
+			if _, ok := known[tc.ID]; ok {
+				continue
+			}
+			known[tc.ID] = struct{}{}
+			parts = append(parts, message.ToolResult{
+				ToolCallID: tc.ID,
+				Name:       tc.Name,
+				Content:    orphanedToolResultText,
+				IsError:    true,
+			})
+		}
+	}
+	if len(parts) == 0 {
+		return 0, nil
+	}
+	if _, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
+		Role:  message.Tool,
+		Parts: parts,
+	}); err != nil {
+		return 0, fmt.Errorf("failed to persist healed tool results: %w", err)
+	}
+	return len(parts), nil
 }
 
 func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
