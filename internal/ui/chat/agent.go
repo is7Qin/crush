@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -181,6 +182,32 @@ func (a *AgentToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 	a.Bump()
 }
 
+// maxCollapsedNestedTools caps how many nested tool calls a
+// delegation renders while collapsed, mirroring the thinking
+// block's fixed-height contract. Older calls collapse into an
+// "earlier tool calls" summary line; Expand shows everything.
+const maxCollapsedNestedTools = 5
+
+// tailNestedTools returns the visible tail of a nested tool list and
+// how many leading items were hidden. Expanded views show everything.
+func tailNestedTools(tools []ToolMessageItem, expanded bool) ([]ToolMessageItem, int) {
+	if expanded || len(tools) <= maxCollapsedNestedTools {
+		return tools, 0
+	}
+	skipped := len(tools) - maxCollapsedNestedTools
+	return tools[len(tools)-maxCollapsedNestedTools:], skipped
+}
+
+// earlierToolCallsSummary renders the collapsed summary line for
+// hidden nested tool calls.
+func earlierToolCallsSummary(sty *styles.Styles, skipped int) string {
+	summary := fmt.Sprintf("… %d earlier tool calls", skipped)
+	if skipped == 1 {
+		summary = "… 1 earlier tool call"
+	}
+	return sty.Tool.AgentPrompt.Render(summary)
+}
+
 // AgentToolRenderContext renders agent tool messages.
 type AgentToolRenderContext struct {
 	agent *AgentToolMessageItem
@@ -241,10 +268,15 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		)
 	}
 
+	// Collapse the nested activity into a fixed tail window so a
+	// busy subagent cannot push the chat down without bound; the
+	// full list is one Expand toggle away.
+	nested, skipped := tailNestedTools(r.agent.nestedTools, opts.ExpandedContent)
+
 	// Build tree with nested tool calls.
 	childTools := tree.Root(header)
 
-	for _, nestedTool := range r.agent.nestedTools {
+	for _, nestedTool := range nested {
 		childView := nestedTool.Render(remainingWidth)
 		childTools.Child(childView)
 	}
@@ -252,6 +284,9 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	// Build parts.
 	var parts []string
 	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, taskTagWidth-5)).String())
+	if skipped > 0 {
+		parts = append(parts, earlierToolCallsSummary(sty, skipped))
+	}
 
 	// Show animation if still running.
 	if !opts.HasResult() && !opts.IsCanceled() {
@@ -398,10 +433,14 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 		),
 	)
 
+	// Collapse the nested activity exactly like agent delegations
+	// above: fixed tail window, full list one Expand toggle away.
+	nested, skipped := tailNestedTools(r.fetch.nestedTools, opts.ExpandedContent)
+
 	// Build tree with nested tool calls.
 	childTools := tree.Root(header)
 
-	for _, nestedTool := range r.fetch.nestedTools {
+	for _, nestedTool := range nested {
 		childView := nestedTool.Render(remainingWidth)
 		childTools.Child(childView)
 	}
@@ -409,6 +448,9 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 	// Build parts.
 	var parts []string
 	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, promptTagWidth-5)).String())
+	if skipped > 0 {
+		parts = append(parts, earlierToolCallsSummary(sty, skipped))
+	}
 
 	// Show animation if still running.
 	if !opts.HasResult() && !opts.IsCanceled() {
