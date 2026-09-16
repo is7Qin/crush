@@ -1063,3 +1063,132 @@ func TestProviderRetryLogFields(t *testing.T) {
 		}, fields)
 	})
 }
+
+func requireToolCallAdjacency(t *testing.T, history []fantasy.Message) {
+	t.Helper()
+	for i, msg := range history {
+		if msg.Role != fantasy.MessageRoleAssistant {
+			continue
+		}
+		var callIDs []string
+		for _, part := range msg.Content {
+			if tc, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](part); ok {
+				callIDs = append(callIDs, tc.ToolCallID)
+			}
+		}
+		if len(callIDs) == 0 {
+			continue
+		}
+		require.Less(t, i+1, len(history), "assistant with tool calls must be followed by a tool message")
+		next := history[i+1]
+		require.Equal(t, fantasy.MessageRoleTool, next.Role,
+			"assistant with tool calls %v must be immediately followed by a tool message, got %q", callIDs, next.Role)
+		responded := make(map[string]bool, len(callIDs))
+		for _, part := range next.Content {
+			if tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part); ok {
+				responded[tr.ToolCallID] = true
+			}
+		}
+		for _, id := range callIDs {
+			require.True(t, responded[id],
+				"tool result for call %q must immediately follow its assistant message", id)
+		}
+	}
+}
+
+func TestPreparePrompt_NonAdjacentToolResults(t *testing.T) {
+	// A user message written between an assistant's tool call and its
+	// result (e.g. resuming while a tool is still running) must not end up
+	// between the two in the built history.
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "run commands"},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ToolCall{
+				ID:       "call_A",
+				Name:     "bash",
+				Input:    `{"command":"date"}`,
+				Finished: true,
+			},
+			message.ToolCall{
+				ID:       "call_B",
+				Name:     "bash",
+				Input:    `{"command":"uptime"}`,
+				Finished: true,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Interleaved user message written while the tools were still running.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "are we done?"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Results arrive late, after the interleaved user message.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{
+				ToolCallID: "call_A",
+				Name:       "bash",
+				Content:    "Fri May 2 21:00:00 UTC 2026",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{
+				ToolCallID: "call_B",
+				Name:       "bash",
+				Content:    "21:00  up 3 days",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+
+	require.Equal(t, message.User, msgs[2].Role, "interleaved user should be between assistant and results in DB order")
+
+	history, _ := agent.preparePrompt(msgs, false)
+
+	requireToolCallAdjacency(t, history)
+
+	// The interleaved user message must still be present, after the results.
+	var foundInterleaved bool
+	for _, msg := range history {
+		if msg.Role != fantasy.MessageRoleUser {
+			continue
+		}
+		for _, part := range msg.Content {
+			if text, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok && text.Text == "are we done?" {
+				foundInterleaved = true
+			}
+		}
+	}
+	require.True(t, foundInterleaved, "interleaved user message must not be dropped")
+}
