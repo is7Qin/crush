@@ -120,6 +120,9 @@ func TestSessionAgentRun_PublishesRetryNotification(t *testing.T) {
 		require.Equal(t, sess.ID, ev.Payload.SessionID)
 		require.Contains(t, ev.Payload.Message, "overloaded")
 		require.Contains(t, ev.Payload.Message, "attempt 1")
+		require.Equal(t, 1, ev.Payload.RetryAttempt)
+		require.Equal(t, int64(1), ev.Payload.RetryDelayMs)
+		require.Contains(t, ev.Payload.RetryReason, "overloaded")
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the retry notification")
 	}
