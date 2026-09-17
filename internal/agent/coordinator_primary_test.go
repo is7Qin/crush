@@ -46,7 +46,7 @@ func (primaryTaskControllerStub) AppendMessage(context.Context, task.MessageRequ
 func TestCoordinator_SetPrimaryAgent_switchesProfile(t *testing.T) {
 	coord := profileTestCoordinator(t)
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	err := coord.SetPrimaryAgent(t.Context(), "FAST")
@@ -54,9 +54,9 @@ func TestCoordinator_SetPrimaryAgent_switchesProfile(t *testing.T) {
 	// Then
 	require.NoError(t, err)
 	assert.Equal(t, "fast", coord.PrimaryAgent())
-	assert.NotSame(t, old, coord.currentAgent)
+	assert.NotSame(t, old, coord.mainAgent)
 	assert.Equal(t, "other-model", coord.Model().ModelCfg.Model)
-	assert.False(t, coord.currentAgent.(*sessionAgent).isSubAgent)
+	assert.False(t, coord.mainAgent.(*sessionAgent).isSubAgent)
 }
 
 func TestCoordinator_SetPrimaryAgent_rejectsInvalidProfile(t *testing.T) {
@@ -74,14 +74,14 @@ func TestCoordinator_SetPrimaryAgent_rejectsInvalidProfile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			coord := profileTestCoordinator(t)
 			old := &mockSessionAgent{}
-			coord.currentAgent = old
+			coord.mainAgent = old
 			coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 			err := coord.SetPrimaryAgent(t.Context(), tt.profile)
 
 			require.ErrorIs(t, err, tt.wantErr)
 			assert.Equal(t, "", coord.PrimaryAgent())
-			assert.Same(t, old, coord.currentAgent)
+			assert.Same(t, old, coord.mainAgent)
 		})
 	}
 }
@@ -89,7 +89,7 @@ func TestCoordinator_SetPrimaryAgent_rejectsInvalidProfile(t *testing.T) {
 func TestCoordinator_SetPrimaryAgent_acceptsCustomProfile(t *testing.T) {
 	coord := profileTestCoordinator(t)
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	err := coord.SetPrimaryAgent(t.Context(), "reviewer")
@@ -101,20 +101,20 @@ func TestCoordinator_SetPrimaryAgent_acceptsCustomProfile(t *testing.T) {
 func TestCoordinator_SetPrimaryAgent_refusesWhileBusy(t *testing.T) {
 	coord := profileTestCoordinator(t)
 	old := &busySessionAgent{busy: true}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	err := coord.SetPrimaryAgent(t.Context(), "fast")
 
 	require.ErrorIs(t, err, ErrPrimaryAgentBusy)
 	assert.Equal(t, "", coord.PrimaryAgent())
-	assert.Same(t, old, coord.currentAgent)
+	assert.Same(t, old, coord.mainAgent)
 }
 
 func TestCoordinator_SetPrimaryAgent_refusesAcceptedRun(t *testing.T) {
 	coord := profileTestCoordinator(t)
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	accept := coord.BeginAccepted("session")
@@ -130,7 +130,7 @@ func TestCoordinator_SetPrimaryAgent_refusesAcceptedRun(t *testing.T) {
 func TestCoordinator_IsBusy_includesAcceptedRun(t *testing.T) {
 	coord := profileTestCoordinator(t)
 	primary := &mockSessionAgent{}
-	coord.currentAgent = primary
+	coord.mainAgent = primary
 	coord.agents = map[string]SessionAgent{config.AgentCoder: primary}
 
 	accept := coord.BeginAccepted("session")
@@ -147,13 +147,13 @@ func TestCoordinator_SetPrimaryAgent_preservesOldAgentOnBuildFailure(t *testing.
 		PromptFile: config.Some("missing-prompt.md"),
 	}
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	err := coord.SetPrimaryAgent(t.Context(), "broken")
 
 	require.Error(t, err)
-	assert.Same(t, old, coord.currentAgent)
+	assert.Same(t, old, coord.mainAgent)
 	assert.Equal(t, "", coord.PrimaryAgent())
 }
 
@@ -166,11 +166,11 @@ func TestCoordinator_SetPrimaryAgent_researchProfileGetsCoderPalette(t *testing.
 	coord := profileTestCoordinator(t)
 	coord.tasks = primaryTaskControllerStub{}
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	require.NoError(t, coord.SetPrimaryAgent(t.Context(), "oracle"))
-	primaryNames := toolNames(coord.currentAgent.(*sessionAgent).tools.Copy())
+	primaryNames := toolNames(coord.mainAgent.(*sessionAgent).tools.Copy())
 	assert.Contains(t, primaryNames, AgentToolName)
 	for _, name := range []string{"agent_status", "agent_output", "agent_list", "agent_cancel", "agent_message"} {
 		assert.Contains(t, primaryNames, name)
@@ -198,11 +198,11 @@ func TestCoordinator_SetPrimaryAgent_primaryPromptOmitsChildRestriction(t *testi
 	coord := profileTestCoordinator(t)
 	coord.tasks = primaryTaskControllerStub{}
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	require.NoError(t, coord.SetPrimaryAgent(t.Context(), config.AgentSisyphus))
-	primaryPrompt := coord.currentAgent.(*sessionAgent).systemPrompt.Get()
+	primaryPrompt := coord.mainAgent.(*sessionAgent).systemPrompt.Get()
 	assert.Contains(t, primaryPrompt, "relentless executor",
 		"the profile's own prompt text must be preserved")
 	assert.NotContains(t, primaryPrompt, "CHILD SESSION RESTRICTION")
@@ -217,7 +217,7 @@ func TestCoordinator_SetPrimaryAgent_primaryPromptOmitsChildRestriction(t *testi
 	// A custom inline profile prompt gets the same primary override and
 	// stays verbatim as a child.
 	require.NoError(t, coord.SetPrimaryAgent(t.Context(), "silen"))
-	primarySilen := coord.currentAgent.(*sessionAgent).systemPrompt.Get()
+	primarySilen := coord.mainAgent.(*sessionAgent).systemPrompt.Get()
 	assert.True(t, strings.HasPrefix(primarySilen, "You are silent."))
 	assert.NotContains(t, primarySilen, "CHILD SESSION RESTRICTION")
 }
@@ -225,7 +225,7 @@ func TestCoordinator_SetPrimaryAgent_primaryPromptOmitsChildRestriction(t *testi
 func TestCoordinator_UpdateModels_usesSelectedPrimaryProfile(t *testing.T) {
 	coord := profileTestCoordinator(t)
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 	require.NoError(t, coord.SetPrimaryAgent(t.Context(), "fast"))
 
@@ -247,11 +247,11 @@ func TestCoordinator_SetPrimaryAgent_keepsPrimaryTaskControlsAndChildDepth(t *te
 	coord := profileTestCoordinator(t)
 	coord.tasks = primaryTaskControllerStub{}
 	old := &mockSessionAgent{}
-	coord.currentAgent = old
+	coord.mainAgent = old
 	coord.agents = map[string]SessionAgent{config.AgentCoder: old}
 
 	require.NoError(t, coord.SetPrimaryAgent(t.Context(), "reviewer"))
-	primary := coord.currentAgent.(*sessionAgent)
+	primary := coord.mainAgent.(*sessionAgent)
 	primaryNames := toolNames(primary.tools.Copy())
 	for _, name := range []string{"agent_status", "agent_output", "agent_list", "agent_cancel", "agent_message"} {
 		assert.Contains(t, primaryNames, name)

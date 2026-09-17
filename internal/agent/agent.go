@@ -316,7 +316,7 @@ func (r *AcceptedRun) Close() {
 		r.agent.endAccepted(r.sessionID)
 	}
 	if r.primaryCoordinator != nil {
-		r.primaryCoordinator.endPrimaryRun()
+		r.primaryCoordinator.endMainRun()
 	}
 }
 

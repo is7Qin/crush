@@ -52,6 +52,7 @@ func (c *fakePrimaryCoordinator) Summarize(context.Context, string) error       
 func (c *fakePrimaryCoordinator) Model() agent.Model                            { return agent.Model{} }
 func (c *fakePrimaryCoordinator) UpdateModels(context.Context) error            { return nil }
 func (c *fakePrimaryCoordinator) GenerateTitle(context.Context, string, string) {}
+func (c *fakePrimaryCoordinator) SetMainAgent(string) error                     { return nil }
 func (c *fakePrimaryCoordinator) SetPrimaryAgent(_ context.Context, profile string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

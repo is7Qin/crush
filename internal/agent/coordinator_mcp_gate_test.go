@@ -53,7 +53,7 @@ func newGateTestCoordinator(t *testing.T, interactive bool) *coordinator {
 
 	agent, err := coord.buildAgent(context.Background(), p, agentCfg, false)
 	require.NoError(t, err)
-	coord.currentAgent = agent
+	coord.mainAgent = agent
 	coord.agents[config.AgentCoder] = agent
 
 	return coord
