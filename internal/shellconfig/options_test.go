@@ -70,7 +70,8 @@ func TestOption_String(t *testing.T) {
 
 	dir := t.TempDir()
 	script := `option data-directory .crush
-option notifications osc`
+option notifications osc
+option default-agent oracle`
 	path := filepath.Join(dir, "crushrc")
 
 	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
@@ -82,6 +83,7 @@ option notifications osc`
 	opts := result["options"].(map[string]any)
 	require.Equal(t, ".crush", opts["data_directory"])
 	require.Equal(t, "osc", opts["notifications"])
+	require.Equal(t, "oracle", opts["default_agent"])
 }
 
 func TestOption_List(t *testing.T) {

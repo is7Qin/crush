@@ -213,6 +213,7 @@ var optionSpecs = map[string]optionSpec{
 	"notifications":  {jsonKey: "notifications", kind: optString},
 	"data-directory": {jsonKey: "data_directory", kind: optString},
 	"initialize-as":  {jsonKey: "initialize_as", kind: optString},
+	"default-agent":  {jsonKey: "default_agent", kind: optString},
 
 	// Integer fields. 0 means "unset": the task manager treats live
 	// quotas of 0 as unlimited and falls back to its default model

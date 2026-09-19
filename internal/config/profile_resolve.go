@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -234,6 +236,28 @@ func (c *Config) DiscoverableAgentProfiles() []string {
 		add(key)
 	}
 	return names
+}
+
+// DefaultPrimaryAgent returns the profile a coordinator should start on:
+// the configured options.default_agent when it names a discoverable
+// profile, otherwise the coder base agent. An unset, unknown, or disabled
+// name is not an error — it warns and falls back, so a typo or a profile
+// disabled out from under the setting can never leave Crush without a
+// primary agent.
+func (c *Config) DefaultPrimaryAgent() string {
+	if c == nil || c.Options == nil {
+		return AgentCoder
+	}
+	name := asciiLower(strings.TrimSpace(c.Options.DefaultAgent))
+	if name == "" {
+		return AgentCoder
+	}
+	if !slices.Contains(c.DiscoverableAgentProfiles(), name) {
+		slog.Warn("Configured default agent is not discoverable; using coder",
+			"default_agent", name)
+		return AgentCoder
+	}
+	return name
 }
 
 // profileDisabled reports the effective disabled policy of a candidate

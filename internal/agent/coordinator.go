@@ -291,7 +291,11 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		taskQuestions: opts.TaskQuestions,
 	}
 
-	agent, profile, err := c.buildPrimaryAgent(ctx, config.AgentCoder)
+	// Start on the configured default agent (options.default_agent),
+	// falling back to the coder base agent when it is unset, unknown,
+	// or disabled. Resolution lives in config so the fallback is
+	// testable without the provider wiring NewCoordinator needs.
+	agent, profile, err := c.buildPrimaryAgent(ctx, opts.Config.Config().DefaultPrimaryAgent())
 	if err != nil {
 		return nil, err
 	}

@@ -374,6 +374,7 @@ type Options struct {
 	DebugLSP             bool        `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
 	DisableAutoSummarize bool        `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
 	MaxRetries           *int        `json:"max_retries,omitempty" jsonschema:"description=Maximum retries for failed model requests. Unset uses the Fantasy default of 3.,minimum=0,default=3"`
+	DefaultAgent         string      `json:"default_agent,omitempty" jsonschema:"description=Agent profile to start new sessions with. Unset uses the coder profile. An unknown or disabled name falls back to coder.,example=oracle,example=plan"`
 	// DataDirectory is where Crush keeps per-project state such as
 	// the SQLite database and workspace overrides. Relative paths are
 	// resolved against the working directory; absolute paths are used
