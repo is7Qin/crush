@@ -66,6 +66,24 @@ func TestDefaultPrimaryAgent(t *testing.T) {
 			},
 			want: AgentCoder,
 		},
+		{
+			name:    "configured roster name wins while base agents are disabled",
+			options: &Options{DefaultAgent: AgentSisyphus},
+			patches: disabledProfiles(AgentCoder, AgentTask),
+			want:    AgentSisyphus,
+		},
+		{
+			name:    "unset default with the base agents disabled falls to a discoverable profile",
+			options: &Options{},
+			patches: disabledProfiles(AgentCoder, AgentTask),
+			want:    AgentSisyphus,
+		},
+		{
+			name:    "unknown default with the base agents disabled falls to a discoverable profile",
+			options: &Options{DefaultAgent: "not-a-profile"},
+			patches: disabledProfiles(AgentCoder, AgentTask),
+			want:    AgentSisyphus,
+		},
 	}
 
 	for _, tt := range tests {
@@ -74,6 +92,58 @@ func TestDefaultPrimaryAgent(t *testing.T) {
 
 			c := &Config{Options: tt.options, AgentProfiles: tt.patches}
 			require.Equal(t, tt.want, c.DefaultPrimaryAgent())
+		})
+	}
+}
+
+// disabledProfiles builds the agents-config patch that disables each name.
+func disabledProfiles(names ...string) map[string]AgentProfilePatch {
+	patches := make(map[string]AgentProfilePatch, len(names))
+	for _, name := range names {
+		patches[name] = AgentProfilePatch{Disabled: Some(true)}
+	}
+	return patches
+}
+
+// TestFallbackDiscoverableAgent pins the profile used when no specific one
+// is requested. The coder base agent is preferred, but disabling it (or
+// both base agents) must still yield a discoverable profile, because
+// startup and profile-less delegations have nothing else to fall back on.
+func TestFallbackDiscoverableAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		patches map[string]AgentProfilePatch
+		want    string
+	}{
+		{
+			name: "prefers the coder base agent",
+			want: AgentCoder,
+		},
+		{
+			name:    "falls to task when coder is disabled",
+			patches: disabledProfiles(AgentCoder),
+			want:    AgentTask,
+		},
+		{
+			name:    "falls to the first roster profile when both base agents are disabled",
+			patches: disabledProfiles(AgentCoder, AgentTask),
+			want:    AgentSisyphus,
+		},
+		{
+			name:    "keeps coder as a last resort when nothing is discoverable",
+			patches: disabledProfiles(BuiltinAgentProfileNames()...),
+			want:    AgentCoder,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := &Config{AgentProfiles: tt.patches}
+			require.Equal(t, tt.want, c.FallbackDiscoverableAgent())
 		})
 	}
 }

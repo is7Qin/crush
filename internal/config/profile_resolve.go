@@ -238,26 +238,50 @@ func (c *Config) DiscoverableAgentProfiles() []string {
 	return names
 }
 
+// FallbackDiscoverableAgent returns the profile to use when no specific
+// one is requested: the coder base agent while it is discoverable,
+// otherwise the first discoverable profile. Disabling the base agents is
+// supported, but it must not leave startup or delegation without a
+// profile to fall back on, so this never returns a disabled name while
+// any profile remains available.
+func (c *Config) FallbackDiscoverableAgent() string {
+	if c == nil {
+		return AgentCoder
+	}
+	available := c.DiscoverableAgentProfiles()
+	if slices.Contains(available, AgentCoder) {
+		return AgentCoder
+	}
+	if len(available) > 0 {
+		return available[0]
+	}
+	return AgentCoder
+}
+
 // DefaultPrimaryAgent returns the profile a coordinator should start on:
 // the configured options.default_agent when it names a discoverable
-// profile, otherwise the coder base agent. An unset, unknown, or disabled
-// name is not an error — it warns and falls back, so a typo or a profile
-// disabled out from under the setting can never leave Crush without a
-// primary agent.
+// profile, otherwise FallbackDiscoverableAgent. An unset, unknown, or
+// disabled name is not an error; it warns and falls back, so a typo or a
+// profile disabled out from under the setting cannot leave Crush without
+// a primary agent.
 func (c *Config) DefaultPrimaryAgent() string {
-	if c == nil || c.Options == nil {
+	if c == nil {
 		return AgentCoder
 	}
-	name := asciiLower(strings.TrimSpace(c.Options.DefaultAgent))
-	if name == "" {
-		return AgentCoder
+	fallback := c.FallbackDiscoverableAgent()
+	configured := ""
+	if c.Options != nil {
+		configured = asciiLower(strings.TrimSpace(c.Options.DefaultAgent))
 	}
-	if !slices.Contains(c.DiscoverableAgentProfiles(), name) {
-		slog.Warn("Configured default agent is not discoverable; using coder",
-			"default_agent", name)
-		return AgentCoder
+	if configured == "" {
+		return fallback
 	}
-	return name
+	if slices.Contains(c.DiscoverableAgentProfiles(), configured) {
+		return configured
+	}
+	slog.Warn("Configured default agent is not discoverable; falling back",
+		"default_agent", configured, "using", fallback)
+	return fallback
 }
 
 // profileDisabled reports the effective disabled policy of a candidate

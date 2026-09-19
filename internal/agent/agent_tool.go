@@ -60,9 +60,6 @@ const (
 	// tool-call messages still carry it, and the chat UI renders
 	// those as agent delegations.
 	LegacyAgentToolName = "agent"
-
-	// defaultAgentProfile is selected when a call omits the profile.
-	defaultAgentProfile = config.AgentCoder
 )
 
 func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
@@ -99,7 +96,10 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 			// here; a config reload cannot change it mid-run. A
 			// continuation re-resolves the current profile/model policy
 			// the same way a fresh delegation does.
-			profile := cmp.Or(params.Profile, defaultAgentProfile)
+			// The coder base agent is the usual default child, but a
+			// user may disable it; ask config for a discoverable
+			// fallback rather than failing every profile-less call.
+			profile := cmp.Or(params.Profile, c.cfg.Config().FallbackDiscoverableAgent())
 			agent, prof, err := c.buildProfileAgent(ctx, profile, params.Model)
 			if err != nil {
 				// Profile selection failures (unknown or disabled
