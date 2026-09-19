@@ -42,6 +42,15 @@ var defaultContextPaths = []string{
 	"AGENTS.md",
 	"agents.md",
 	"Agents.md",
+	// OMO (oh-my-openagent) project memory index. `.omo/memory/` holds
+	// the durable learnings a work session leaves behind — one file
+	// per conclusion plus distilled `topics/`. Only the index is
+	// injected: MEMORY.md is one line per entry (~10KB) and points at
+	// each file by path, so the agent reads the specific memory it
+	// needs on demand instead of carrying the whole directory (which
+	// runs to hundreds of KB) in every system prompt. The path is
+	// ignored when absent, so projects without OMO are unaffected.
+	".omo/memory/MEMORY.md",
 }
 
 type SelectedModelType string
