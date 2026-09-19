@@ -54,3 +54,6 @@ manpages/
 completions/crush.*sh
 .prettierignore
 .task
+
+# Local design specs and reviews (not product docs)
+docs/specs/
