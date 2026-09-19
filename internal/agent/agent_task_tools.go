@@ -154,11 +154,25 @@ func newAgentListTool(ctrl TaskController) fantasy.AgentTool {
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}
-			if len(tasks) == 0 {
+			var live []*task.Task
+			finished := 0
+			for _, t := range tasks {
+				if t.Status.Live() {
+					live = append(live, t)
+				} else {
+					finished++
+				}
+			}
+			if len(live) == 0 {
+				if finished > 0 {
+					return fantasy.NewTextResponse(
+						fmt.Sprintf("no live agent tasks (%d finished; read completed work by id via agent_output)", finished),
+					), nil
+				}
 				return fantasy.NewTextResponse("no agent tasks"), nil
 			}
-			lines := make([]string, 0, len(tasks))
-			for _, t := range tasks {
+			lines := make([]string, 0, len(live))
+			for _, t := range live {
 				lines = append(lines, fmt.Sprintf(
 					"- %s status=%s profile=%s model=%s/%s",
 					t.ID, t.Status, t.Profile, t.Provider, t.Model,

@@ -157,6 +157,74 @@ func TestAgentListTool_ScopedToOwner(t *testing.T) {
 	assert.Equal(t, task.StatusCompleted, terms[secondID].Status)
 }
 
+// listStubController is a TaskController returning canned tasks for
+// list-behavior tests.
+type listStubController struct {
+	tasks []*task.Task
+}
+
+func (s listStubController) Status(context.Context, string, string) (*task.Task, error) {
+	return nil, task.ErrNotFound
+}
+
+func (s listStubController) Output(context.Context, string, string) (task.Result, bool, error) {
+	return task.Result{}, false, task.ErrNotFound
+}
+
+func (s listStubController) List(context.Context, string, string) ([]*task.Task, error) {
+	return s.tasks, nil
+}
+
+func (s listStubController) Cancel(context.Context, string, string) error { return nil }
+
+func (s listStubController) AppendMessage(context.Context, task.MessageRequest) (task.MessageAccepted, error) {
+	return task.MessageAccepted{}, task.ErrNotFound
+}
+
+// TestAgentListTool_LiveOnly proves agent_list hides terminal
+// history: live tasks render one line each in the existing format,
+// finished tasks never appear, and an empty live set names the
+// finished count without listing it.
+func TestAgentListTool_LiveOnly(t *testing.T) {
+	t.Parallel()
+	liveTask := func(id string, status task.Status) *task.Task {
+		return &task.Task{ID: id, Status: status, Profile: "coder", Provider: "p", Model: "m"}
+	}
+	ctx := delegationCtx(t, "owner", "msg-live-only")
+
+	mixed := newAgentListTool(listStubController{tasks: []*task.Task{
+		liveTask("run-1", task.StatusRunning),
+		liveTask("done-1", task.StatusCompleted),
+		liveTask("pend-1", task.StatusPending),
+		liveTask("fail-1", task.StatusFailed),
+		liveTask("wait-1", task.StatusWaitingForInput),
+		liveTask("cancel-1", task.StatusCancelled),
+		liveTask("intr-1", task.StatusInterrupted),
+	}})
+	got := runControlTool(t, mixed, ctx, `{}`)
+	require.False(t, got.IsError, got.Content)
+	for _, id := range []string{"run-1", "pend-1", "wait-1"} {
+		assert.Contains(t, got.Content, id)
+	}
+	for _, id := range []string{"done-1", "fail-1", "cancel-1", "intr-1"} {
+		assert.NotContains(t, got.Content, id, "terminal tasks stay durable and reachable by id, never listed")
+	}
+
+	onlyFinished := newAgentListTool(listStubController{tasks: []*task.Task{
+		liveTask("done-1", task.StatusCompleted),
+		liveTask("fail-1", task.StatusFailed),
+	}})
+	empty := runControlTool(t, onlyFinished, ctx, `{}`)
+	require.False(t, empty.IsError, empty.Content)
+	assert.Contains(t, empty.Content, "no live agent tasks")
+	assert.Contains(t, empty.Content, "2 finished")
+	assert.NotContains(t, empty.Content, "done-1")
+
+	none := runControlTool(t, newAgentListTool(listStubController{}), ctx, `{}`)
+	require.False(t, none.IsError, none.Content)
+	assert.Equal(t, "no agent tasks", none.Content)
+}
+
 // TestAgentCancelTool_PendingAndErrors proves cancellation of a queued
 // (pending) task terminalizes it as cancelled without waiting on the
 // running sibling, and that unknown/foreign ids are model-visible
