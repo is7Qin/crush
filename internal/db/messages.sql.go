@@ -235,6 +235,58 @@ func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) (
 	return items, nil
 }
 
+const listMessagesBySessionFrom = `-- name: ListMessagesBySessionFrom :many
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, prism_model_id, prism_model_name, prism_hypercredit_savings, prism_dollar_savings
+FROM messages
+WHERE session_id = ?
+AND rowid >= (SELECT rowid FROM messages WHERE id = ? AND session_id = ?)
+ORDER BY created_at ASC
+`
+
+type ListMessagesBySessionFromParams struct {
+	SessionID   string `json:"session_id"`
+	ID          string `json:"id"`
+	SessionID_2 string `json:"session_id_2"`
+}
+
+func (q *Queries) ListMessagesBySessionFrom(ctx context.Context, arg ListMessagesBySessionFromParams) ([]Message, error) {
+	rows, err := q.query(ctx, q.listMessagesBySessionFromStmt, listMessagesBySessionFrom, arg.SessionID, arg.ID, arg.SessionID_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Message{}
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.Parts,
+			&i.Model,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+			&i.Provider,
+			&i.IsSummaryMessage,
+			&i.PrismModelID,
+			&i.PrismModelName,
+			&i.PrismHypercreditSavings,
+			&i.PrismDollarSavings,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUserMessagesBySession = `-- name: ListUserMessagesBySession :many
 SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, prism_model_id, prism_model_name, prism_hypercredit_savings, prism_dollar_savings
 FROM messages

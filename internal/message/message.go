@@ -49,6 +49,10 @@ type Service interface {
 	Update(ctx context.Context, message Message) error
 	Get(ctx context.Context, id string) (Message, error)
 	List(ctx context.Context, sessionID string) ([]Message, error)
+	// ListFrom returns messages at and after the boundary message,
+	// without loading or parsing earlier rows. Used by the agent
+	// per-turn path once a session has a summary boundary.
+	ListFrom(ctx context.Context, sessionID, fromMessageID string) ([]Message, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]Message, error)
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	GetLastAssistantMessage(ctx context.Context, sessionID string) (Message, error)
@@ -510,6 +514,33 @@ func (s *service) List(ctx context.Context, sessionID string) ([]Message, error)
 	dbMessages, err := s.q.ListMessagesBySession(ctx, sessionID)
 	if err != nil {
 		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+// ListFrom implements [Service.ListFrom]. Rows before the boundary
+// are never read from SQLite, so their parts are never parsed. When
+// the boundary ID is missing from the session the subquery matches
+// nothing, and we fall back to the full [Service.List] — the same
+// result the in-memory slice produces for a stale pointer.
+func (s *service) ListFrom(ctx context.Context, sessionID, fromMessageID string) ([]Message, error) {
+	dbMessages, err := s.q.ListMessagesBySessionFrom(ctx, db.ListMessagesBySessionFromParams{
+		SessionID:   sessionID,
+		ID:          fromMessageID,
+		SessionID_2: sessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(dbMessages) == 0 {
+		return s.List(ctx, sessionID)
 	}
 	messages := make([]Message, len(dbMessages))
 	for i, dbMessage := range dbMessages {

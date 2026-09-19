@@ -726,7 +726,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	msgs, err := a.getSessionMessages(ctx, currentSession)
+	msgs, err := a.getRunMessages(ctx, currentSession)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
@@ -740,7 +740,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		slog.Warn("Failed to heal orphaned tool calls", "session_id", call.SessionID, "error", healErr)
 	} else if healed > 0 {
 		slog.Info("Healed orphaned tool calls", "session_id", call.SessionID, "count", healed)
-		if msgs, err = a.getSessionMessages(ctx, currentSession); err != nil {
+		if msgs, err = a.getRunMessages(ctx, currentSession); err != nil {
 			return nil, fmt.Errorf("failed to re-list messages after healing orphans: %w", err)
 		}
 	}
@@ -1871,6 +1871,26 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 			msgs = msgs[summaryMsgIndex:]
 			msgs[0].Role = message.User
 		}
+	}
+	return msgs, nil
+}
+
+// getRunMessages loads the same prompt-visible history as
+// [sessionAgent.getSessionMessages] but reads only rows at and after
+// the summary boundary, so pre-summary parts are never fetched or
+// parsed. Sessions without a boundary use the full loader. The
+// summary row itself is kept and presented as a user message, exactly
+// as the in-memory slice does.
+func (a *sessionAgent) getRunMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
+	if session.SummaryMessageID == "" {
+		return a.getSessionMessages(ctx, session)
+	}
+	msgs, err := a.messages.ListFrom(ctx, session.ID, session.SummaryMessageID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list messages: %w", err)
+	}
+	if len(msgs) > 0 && msgs[0].ID == session.SummaryMessageID {
+		msgs[0].Role = message.User
 	}
 	return msgs, nil
 }
