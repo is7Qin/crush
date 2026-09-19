@@ -124,6 +124,14 @@ task with the tools available to you and report the result to the parent.`
 // explicit modes: primary prompts are returned unchanged; child prompts get
 // the child-only delegation restriction. A prompt file and the built-in
 // coder/task templates are returned unchanged in primary mode.
+//
+// Context merge rule for template-built child prompts: the child's
+// project context paths come from the resolved profile
+// (prof.Agent.ContextPaths, which defaults to Options.ContextPaths
+// when unpatched and is replaced wholesale by a profile
+// context_paths patch), while Options.GlobalContextPaths always
+// applies on top. Primary prompts never take the profile override,
+// so coder/primary semantics are unchanged.
 func (c *coordinator) profileSystemPrompt(ctx context.Context, prof config.ResolvedProfile, large Model, primary bool) (string, error) {
 	withChildRestriction := func(prompt string) string {
 		if primary {
@@ -147,7 +155,11 @@ func (c *coordinator) profileSystemPrompt(ctx context.Context, prof config.Resol
 	if prof.Name == config.AgentCoder {
 		tmpl = coderPromptTmpl
 	}
-	p, err := prompt.NewPrompt(prof.Name, string(tmpl), prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	opts := []prompt.Option{prompt.WithWorkingDir(c.cfg.WorkingDir())}
+	if !primary && prof.Agent.ContextPaths != nil {
+		opts = append(opts, prompt.WithContextPaths(prof.Agent.ContextPaths))
+	}
+	p, err := prompt.NewPrompt(prof.Name, string(tmpl), opts...)
 	if err != nil {
 		return "", err
 	}
