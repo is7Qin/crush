@@ -4,6 +4,16 @@ import (
 	"strings"
 )
 
+// maxRenderCacheEntries bounds the F6 list-level render memo so
+// resident memory stays proportional to the viewport, not to the
+// total history length. A typical terminal shows well under 20
+// items; 64 covers the visible window plus several viewports of
+// scroll-back/forward without re-rendering, while keeping retained
+// text a small constant. Evicted entries re-render on demand and
+// are byte-identical because the (width, version) key still
+// governs validity.
+const maxRenderCacheEntries = 64
+
 // List represents a list of items that can be lazily rendered. A list is
 // always rendered like a chat conversation where items are stacked vertically
 // from top to bottom.
@@ -41,14 +51,18 @@ type List struct {
 	totalHeightValid bool
 
 	// cache is the F6 list-level render memo, keyed by item pointer.
-	// Each entry stores the rendered content, a pre-split slice of
-	// lines (so AtBottom / Render / VisibleItemIndices /
-	// findItemAtY all share one render per frame), the height, and
-	// the keys that govern invalidation (width and version). The
-	// frozen flag mirrors §4.5.1: once a Finished() item is
+	// Each entry stores one copy of the rendered content plus the
+	// height and the keys that govern invalidation (width and
+	// version). The line slice is derived lazily at draw time so
+	// off-screen entries never retain a second copy of the text.
+	// The frozen flag mirrors §4.5.1: once a Finished() item is
 	// rendered, subsequent draws return the stored output verbatim
-	// without calling back into Render.
-	cache map[Item]*listCacheEntry
+	// without calling back into Render. The memo is an LRU capped
+	// at maxRenderCacheEntries; eviction re-renders byte-identical
+	// output on next use. Recency is tracked by cacheSeq, bumped
+	// on every entry use.
+	cache    map[Item]*listCacheEntry
+	cacheSeq uint64
 
 	// freezeSuppressed marks items the list must not freeze on the
 	// next render even when their Finished() reports true. This is
@@ -61,18 +75,15 @@ type List struct {
 
 // listCacheEntry is the per-item entry in the list-level render memo.
 type listCacheEntry struct {
-	width   int
-	version uint64
-	frozen  bool
-	content string
-	lines   []string
-	height  int
+	width    int
+	version  uint64
+	frozen   bool
+	lastUsed uint64
+	content  string
+	height   int
 }
 
 // renderedItem is the legacy view of a cached entry returned by getItem.
-// Internal callers that don't need the line slice keep using this
-// shape; functions that walk lines (Render) take the slice off the
-// cache entry directly.
 type renderedItem struct {
 	content string
 	height  int
@@ -338,17 +349,20 @@ func (l *List) renderItemEntry(idx int) *listCacheEntry {
 		// last render. Selection-drag suppression turns this into
 		// a miss only if the entry is frozen.
 		if !entry.frozen {
+			l.cacheSeq++
+			entry.lastUsed = l.cacheSeq
 			return entry
 		}
 		if _, suppressed := l.freezeSuppressed[rawItem]; !suppressed {
+			l.cacheSeq++
+			entry.lastUsed = l.cacheSeq
 			return entry
 		}
 	}
 
 	rendered := item.Render(l.width)
 	rendered = strings.TrimRight(rendered, "\n")
-	lines := strings.Split(rendered, "\n")
-	height := len(lines)
+	height := len(strings.Split(rendered, "\n"))
 
 	// Re-read the version after Render so that any version bumps
 	// caused by Render itself (e.g. an item that mutates internal
@@ -376,9 +390,31 @@ func (l *List) renderItemEntry(idx int) *listCacheEntry {
 	entry.version = finalVersion
 	entry.frozen = frozen
 	entry.content = rendered
-	entry.lines = lines
 	entry.height = height
+	l.cacheSeq++
+	entry.lastUsed = l.cacheSeq
+	l.evictOldest()
 	return entry
+}
+
+// evictOldest drops least-recently-used entries until the memo is
+// back within maxRenderCacheEntries. Frozen entries are evictable:
+// re-rendering one later reproduces the same bytes under the same
+// (width, version) key.
+func (l *List) evictOldest() {
+	for len(l.cache) > maxRenderCacheEntries {
+		var oldest Item
+		var oldestUsed uint64
+		first := true
+		for k, e := range l.cache {
+			if first || e.lastUsed < oldestUsed {
+				oldest = k
+				oldestUsed = e.lastUsed
+				first = false
+			}
+		}
+		delete(l.cache, oldest)
+	}
 }
 
 // invalidateAll drops every cache entry. Called on width changes.
@@ -596,7 +632,9 @@ func (l *List) Render() string {
 		if entry == nil {
 			break
 		}
-		itemLines := entry.lines
+		// Split the single retained copy lazily; only visible
+		// items pay for this per frame.
+		itemLines := strings.Split(entry.content, "\n")
 		itemHeight := len(itemLines)
 
 		if currentOffset >= 0 && currentOffset < itemHeight {
