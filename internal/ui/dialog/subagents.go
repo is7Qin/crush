@@ -3,6 +3,7 @@ package dialog
 import (
 	"fmt"
 	"image"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,11 @@ type Subagents struct {
 
 	loading  bool
 	fetchErr string
+
+	// tasks holds the full ordered snapshot set. The filterable list
+	// only shows a capped window of it while the query is empty; a
+	// non-empty query searches everything in tasks.
+	tasks []proto.TaskSnapshot
 
 	bodyArea      image.Rectangle
 	mouseScrolled bool
@@ -97,7 +103,10 @@ func (s *Subagents) ID() string {
 }
 
 // SetTasks replaces the listed snapshots, keeping the selection on the
-// same task id when it is still present after the refresh.
+// same task id when it is still present after the refresh. Snapshots
+// are ordered live-first with finished newest-first, and the finished
+// section is capped while the filter query is empty (see
+// applyTaskVisibility).
 func (s *Subagents) SetTasks(tasks []proto.TaskSnapshot) {
 	selectedID := ""
 	if item, ok := s.list.SelectedItem().(*SubagentItem); ok && item != nil {
@@ -106,16 +115,53 @@ func (s *Subagents) SetTasks(tasks []proto.TaskSnapshot) {
 
 	s.loading = false
 	s.fetchErr = ""
-	s.list.SetItems(subagentItems(s.com.Styles, tasks)...)
-	// Always re-apply the current query (even when empty) so a stale
-	// list-level filter can never hide rows after a refresh.
-	s.list.SetFilter(s.input.Value())
+	s.tasks = orderSubagentSnapshots(tasks)
+	s.applyTaskVisibility()
 	if index := s.indexOfTask(selectedID); index >= 0 {
 		s.list.SetSelected(index)
 	} else {
 		s.list.SetSelected(0)
 	}
 	s.list.ScrollToSelected()
+}
+
+// applyTaskVisibility rebuilds the filterable items from the full
+// ordered snapshot set for the current query. With an empty query the
+// finished section is capped at maxFinishedSubagents with one summary
+// row appended for the remainder; with a non-empty query every task
+// is listed (no cap, no summary row) so filtering reaches all tasks.
+func (s *Subagents) applyTaskVisibility() {
+	query := s.input.Value()
+	if query != "" {
+		s.list.SetItems(subagentItems(s.com.Styles, s.tasks)...)
+		s.list.SetFilter(query)
+		return
+	}
+	visible := make([]proto.TaskSnapshot, 0, len(s.tasks))
+	hidden := 0
+	shownFinished := 0
+	for _, snapshot := range s.tasks {
+		if !isLiveSubagentStatus(snapshot.Status) {
+			if shownFinished >= maxFinishedSubagents {
+				hidden++
+				continue
+			}
+			shownFinished++
+		}
+		visible = append(visible, snapshot)
+	}
+	items := subagentItems(s.com.Styles, visible)
+	if hidden > 0 {
+		items = append(items, &subagentsMoreItem{
+			Versioned: list.NewVersioned(),
+			count:     hidden,
+			t:         s.com.Styles,
+		})
+	}
+	// Always re-apply the current query (even when empty) so a stale
+	// list-level filter can never hide rows after a refresh.
+	s.list.SetItems(items...)
+	s.list.SetFilter(query)
 }
 
 // SetError moves the dialog into its error state, shown until the next
@@ -193,7 +239,7 @@ func (s *Subagents) HandleMsg(msg tea.Msg) Action {
 			var cmd tea.Cmd
 			s.input, cmd = s.input.Update(msg)
 			if s.input.Value() != prevValue {
-				s.list.SetFilter(s.input.Value())
+				s.applyTaskVisibility()
 				s.list.ScrollToTop()
 				s.list.SetSelected(0)
 			}
@@ -450,4 +496,108 @@ func subagentItems(t *styles.Styles, tasks []proto.TaskSnapshot) []list.Filterab
 		items[i] = &SubagentItem{Versioned: list.NewVersioned(), snapshot: snapshot, t: t}
 	}
 	return items
+}
+
+// maxFinishedSubagents bounds the finished section while the filter
+// query is empty, so a long-lived session never opens as a wall of
+// finished tasks. Live tasks are never capped, and a non-empty query
+// searches every task (see applyTaskVisibility).
+const maxFinishedSubagents = 5
+
+// isLiveSubagentStatus reports whether a task status counts as live
+// (listed first, never capped).
+func isLiveSubagentStatus(status string) bool {
+	switch status {
+	case "pending", "running", "waiting_for_input":
+		return true
+	}
+	return false
+}
+
+// orderSubagentSnapshots returns live tasks first (in arrival order),
+// then finished tasks newest-first by completion time (falling back
+// to creation time). The sort is stable, so tasks without parseable
+// timestamps keep their arrival order.
+func orderSubagentSnapshots(tasks []proto.TaskSnapshot) []proto.TaskSnapshot {
+	ordered := make([]proto.TaskSnapshot, len(tasks))
+	copy(ordered, tasks)
+	var live []proto.TaskSnapshot
+	var finished []proto.TaskSnapshot
+	for _, snapshot := range ordered {
+		if isLiveSubagentStatus(snapshot.Status) {
+			live = append(live, snapshot)
+		} else {
+			finished = append(finished, snapshot)
+		}
+	}
+	sort.SliceStable(finished, func(i, j int) bool {
+		return subagentRecency(finished[i]).After(subagentRecency(finished[j]))
+	})
+	return append(live, finished...)
+}
+
+// subagentRecency returns the timestamp that orders one finished
+// task against another: completion time when known, otherwise
+// creation time. Unparseable timestamps sort oldest.
+func subagentRecency(snapshot proto.TaskSnapshot) time.Time {
+	if at, err := proto.ParseWireTime(snapshot.CompletedAt); err == nil && !at.IsZero() {
+		return at
+	}
+	if at, err := proto.ParseWireTime(snapshot.CreatedAt); err == nil {
+		return at
+	}
+	return time.Time{}
+}
+
+// subagentsMoreItem is the single summary row appended after the
+// capped finished section, e.g. "… 12 more finished (type to
+// filter)". It is not a task: activating it is a no-op (the dialog
+// only acts on *SubagentItem selections), and it never appears while
+// a filter query is active.
+type subagentsMoreItem struct {
+	*list.Versioned
+	count   int
+	t       *styles.Styles
+	focused bool
+}
+
+var _ list.FilterableItem = (*subagentsMoreItem)(nil)
+
+// Finished implements list.Item. The summary row is render-stable
+// outside of explicit SetFocused calls.
+func (m *subagentsMoreItem) Finished() bool {
+	return true
+}
+
+// Filter implements list.FilterableItem. The row is only ever listed
+// with an empty query, so it matches nothing.
+func (m *subagentsMoreItem) Filter() string {
+	return ""
+}
+
+// text returns the summary line.
+func (m *subagentsMoreItem) text() string {
+	return fmt.Sprintf("… %d more finished (type to filter)", m.count)
+}
+
+// SetFocused sets the focus state of the item.
+func (m *subagentsMoreItem) SetFocused(focused bool) {
+	if m.focused == focused {
+		return
+	}
+	m.focused = focused
+	if m.Versioned != nil {
+		m.Bump()
+	}
+}
+
+// Render returns the string representation of the summary row.
+func (m *subagentsMoreItem) Render(width int) string {
+	sty := ListItemStyles{
+		ItemBlurred:     m.t.Dialog.NormalItem,
+		ItemFocused:     m.t.Dialog.SelectedItem,
+		InfoTextBlurred: m.t.Dialog.ListItem.InfoBlurred,
+		InfoTextFocused: m.t.Dialog.ListItem.InfoFocused,
+	}
+	return renderItem(sty, m.text(), "", m.focused, width, nil, nil)
 }
