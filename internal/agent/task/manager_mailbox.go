@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 )
@@ -87,11 +88,50 @@ func (m *Manager) AppendMessage(ctx context.Context, req MessageRequest) (Messag
 
 	var events []Event
 	if t.Status.Terminal() {
-		events = m.scheduleFollowUpLocked(ctx, msg.ChildSessionID, msg.ID, &accepted.AttemptTaskID)
+		events = m.scheduleFollowUpLocked(ctx, t, msg.ID, &accepted.AttemptTaskID)
 	}
 	m.mu.Unlock()
 	m.events.publish(events...)
 	return accepted, nil
+}
+
+// rebuildChildLocked rebinds a released child session through the
+// runner factory, rebuilding from the stored task record. It reports
+// the retained binding for dispatch. A missing factory or a factory
+// error leaves the message queued, preserving the previous-process
+// behavior. Callers must hold m.mu.
+func (m *Manager) rebuildChildLocked(ctx context.Context, t *Task) (*childState, error) {
+	if m.runnerFactory == nil {
+		return nil, ErrNotFound
+	}
+	rb, err := m.runnerFactory(ctx, *t.clone())
+	if err != nil {
+		slog.Warn("Failed to rebuild child runner",
+			"child_session_id", t.ChildSessionID, "error", err)
+		return nil, err
+	}
+	if rb.Run == nil {
+		slog.Warn("Child runner factory returned no runner",
+			"child_session_id", t.ChildSessionID)
+		return nil, errReleasedRunner
+	}
+	key := rb.Key
+	if key.Provider == "" && key.Model == "" {
+		key = CapacityKey{WorkspaceID: m.workspaceID, Provider: t.Provider, Model: t.Model}
+	}
+	if key.WorkspaceID == "" {
+		key.WorkspaceID = m.workspaceID
+	}
+	parent := rb.ParentSessionID
+	if parent == "" {
+		parent = t.ParentSessionID
+		if parent == "" {
+			parent = t.OwnerSessionID
+		}
+	}
+	child := &childState{id: t.ChildSessionID, parentSessionID: parent, key: key, run: rb.Run}
+	m.children[t.ChildSessionID] = child
+	return child, nil
 }
 
 // scheduleFollowUpLocked tries to start the next attempt for a
@@ -99,13 +139,23 @@ func (m *Manager) AppendMessage(ctx context.Context, req MessageRequest) (Messag
 // the acceptance can name the created attempt. claimedMessageID,
 // when non-empty and matched by the created attempt, is reported
 // through attemptOut. Quota is reserved before the attempt exists;
-// capacity defers through the normal FIFO pump.
-func (m *Manager) scheduleFollowUpLocked(ctx context.Context, childSessionID, claimedMessageID string, attemptOut *string) []Event {
-	child, ok := m.children[childSessionID]
-	if !ok || m.closed || child.wish != nil || child.live != nil {
-		// Another entry owns this child's next attempt, or the child
-		// belongs to a previous process whose runner is gone: the
-		// message stays queued for the next dispatch point.
+// capacity defers through the normal FIFO pump. A released child is
+// rebuilt through the runner factory; without a factory, or when
+// the rebuild fails, the message stays queued for the next dispatch
+// point.
+func (m *Manager) scheduleFollowUpLocked(ctx context.Context, t *Task, claimedMessageID string, attemptOut *string) []Event {
+	child, ok := m.children[t.ChildSessionID]
+	if !ok {
+		rebuilt, err := m.rebuildChildLocked(ctx, t)
+		if err != nil {
+			return nil
+		}
+		child = rebuilt
+		ok = true
+	}
+	if m.closed || child.wish != nil || child.live != nil {
+		// Another entry owns this child's next attempt: the message
+		// stays queued for the next dispatch point.
 		return nil
 	}
 	if !m.reserveQuotaLocked(child.parentSessionID) {

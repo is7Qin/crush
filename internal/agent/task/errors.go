@@ -32,4 +32,9 @@ var (
 	// ErrRunFenced rejects a tool admission from a late runner whose
 	// attempt has already been fenced for terminalization.
 	ErrRunFenced = errors.New("task run fenced: tool admission closed")
+	// errReleasedRunner terminalizes an attempt dispatched without a
+	// runner. Dispatch only starts attempts for bound children, so
+	// this is unreachable unless a release raced a dispatch; failing
+	// loudly beats a nil panic and keeps the message queued.
+	errReleasedRunner = errors.New("child runner was released")
 )

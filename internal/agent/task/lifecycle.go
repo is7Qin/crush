@@ -76,7 +76,35 @@ func (m *Manager) terminalizedLocked(ctx context.Context, t *Task, at *attemptSt
 	}
 	events = append(events, eventForTransition(t, StatusPending))
 	events = append(events, m.followUpLocked(ctx, at.child)...)
+	m.maybeReleaseChildLocked(at.child)
 	return events
+}
+
+// maybeReleaseChildLocked frees per-child memory once the child has
+// nothing left: no queued slot wish, no live attempt, no queued
+// mailbox hint, and no dispatch in flight (callers run under m.mu,
+// so no dispatch runs concurrently). It clears the heavy runner
+// reference and drops the children and queuedMsgs entries; a later
+// continuation rebuilds the binding through the runner factory.
+// Callers must hold m.mu.
+func (m *Manager) maybeReleaseChildLocked(child *childState) {
+	if child == nil || child.live != nil || child.wish != nil {
+		return
+	}
+	if m.runnerFactory == nil {
+		// Without a rebuild path a release would strand
+		// continuations, so retain the binding (the historical
+		// behavior) until a factory is wired.
+		return
+	}
+	if m.queuedMsgs[child.id] > 0 {
+		return
+	}
+	child.run = nil
+	child.key = CapacityKey{}
+	child.parentSessionID = ""
+	delete(m.children, child.id)
+	delete(m.queuedMsgs, child.id)
 }
 
 // releaseLocked frees live quota and, if held, the running slot, then
@@ -187,6 +215,14 @@ func (m *Manager) pumpLocked(ctx context.Context, key CapacityKey) []Event {
 // the dispatched record, whether a message was claimed, and the
 // events to publish.
 func (m *Manager) dispatchLocked(ctx context.Context, child *childState, pending *attemptState) (*Task, bool, []Event, error) {
+	if child.run == nil {
+		// A released binding must be rebuilt before it can run;
+		// the pump only queues wishes for bound children, so this
+		// is unreachable. Keep the message queued loudly.
+		slog.Error("Dispatch found released child runner",
+			"child_session_id", child.id, "pending", pending != nil)
+		return nil, false, nil, errReleasedRunner
+	}
 	m.running[child.key]++
 	t, found, err := m.store.DispatchNextChildMessage(ctx, child.id)
 	if err != nil {

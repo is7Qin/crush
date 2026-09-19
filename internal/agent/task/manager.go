@@ -37,11 +37,32 @@ func (l *Limits) applyDefaults() {
 	}
 }
 
+// RebuiltChild is a factory-provided runner plus its capacity
+// identity for a released child session. Key may leave WorkspaceID
+// empty; the manager fills it. ParentSessionID may be empty; the
+// manager falls back to the stored task record.
+type RebuiltChild struct {
+	Run             Runner
+	Key             CapacityKey
+	ParentSessionID string
+}
+
+// RunnerFactory rebuilds the runner for a released child session.
+// t is a copy of the stored task addressed by the continuation, so
+// profile and model are recoverable without a new store index. It
+// runs under the manager lock; implementations must be fast and
+// must not call back into the manager.
+type RunnerFactory func(ctx context.Context, t Task) (RebuiltChild, error)
+
 // Config wires a Manager. Store defaults to MemoryStore.
 type Config struct {
 	WorkspaceID string
 	Limits      Limits
 	Store       Store
+	// RunnerFactory rebuilds runners for released children. Nil
+	// preserves the old behavior: messages for a missing child stay
+	// queued until a new admission rebinds it.
+	RunnerFactory RunnerFactory
 }
 
 // Runner executes one task attempt against the child session. It
@@ -90,13 +111,14 @@ type Manager struct {
 	store       Store
 	events      *broker
 
-	mu           sync.Mutex
-	closed       bool
-	liveTotal    int
-	liveByParent map[string]int
-	running      map[CapacityKey]int
-	queue        map[CapacityKey][]*queueItem
-	live         map[string]*attemptState
+	mu            sync.Mutex
+	closed        bool
+	liveTotal     int
+	liveByParent  map[string]int
+	running       map[CapacityKey]int
+	queue         map[CapacityKey][]*queueItem
+	live          map[string]*attemptState
+	runnerFactory RunnerFactory
 	// children keeps one runner binding per retained child session
 	// so queued messages and continuations can start successor
 	// attempts long after the admission call returned.
@@ -123,17 +145,18 @@ func New(ctx context.Context, cfg Config) *Manager {
 		store = NewMemoryStore()
 	}
 	return &Manager{
-		ctx:          ctx,
-		workspaceID:  cfg.WorkspaceID,
-		limits:       cfg.Limits,
-		store:        store,
-		events:       newBroker(),
-		liveByParent: map[string]int{},
-		running:      map[CapacityKey]int{},
-		queue:        map[CapacityKey][]*queueItem{},
-		live:         map[string]*attemptState{},
-		children:     map[string]*childState{},
-		queuedMsgs:   map[string]int{},
+		ctx:           ctx,
+		workspaceID:   cfg.WorkspaceID,
+		limits:        cfg.Limits,
+		store:         store,
+		events:        newBroker(),
+		liveByParent:  map[string]int{},
+		running:       map[CapacityKey]int{},
+		queue:         map[CapacityKey][]*queueItem{},
+		live:          map[string]*attemptState{},
+		children:      map[string]*childState{},
+		queuedMsgs:    map[string]int{},
+		runnerFactory: cfg.RunnerFactory,
 
 		terminalRetryAttempts:  8,
 		terminalRetryBaseDelay: 250 * time.Millisecond,
@@ -151,6 +174,15 @@ func (m *Manager) Subscribe(fn func(Event)) func() {
 // Store returns the manager's durable task store, the source of
 // truth for owner-scoped task, outbox, and inbox resync reads.
 func (m *Manager) Store() Store { return m.store }
+
+// SetRunnerFactory installs the factory that rebuilds runners for
+// released child sessions. It is the post-construction wiring used
+// when the factory needs dependencies built after the manager.
+func (m *Manager) SetRunnerFactory(f RunnerFactory) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runnerFactory = f
+}
 
 // Start durably admits one task attempt and returns the acceptance
 // snapshot without waiting for the child. Admission is atomic: the
@@ -276,7 +308,12 @@ func (m *Manager) runAttempt(at *attemptState) {
 	if !m.stillLive(at.id) {
 		return
 	}
-	res, err := at.child.run(at.runCtx, at.handle)
+	run := at.child.run
+	if run == nil {
+		m.settle(at, Result{}, errReleasedRunner)
+		return
+	}
+	res, err := run(at.runCtx, at.handle)
 	m.settle(at, res, err)
 }
 

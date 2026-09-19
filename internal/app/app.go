@@ -915,6 +915,17 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		slog.Error("Failed to create coder agent", "err", err)
 		return err
 	}
+	// Released child sessions rebuild their runner on continuation
+	// instead of pinning a SessionAgent per child for the process
+	// lifetime. The factory closes over the coordinator, so it is
+	// installed after both exist.
+	if app.taskManager != nil {
+		if provider, ok := app.AgentCoordinator.(interface {
+			TaskRunnerFactory() task.RunnerFactory
+		}); ok {
+			app.taskManager.SetRunnerFactory(provider.TaskRunnerFactory())
+		}
+	}
 	return nil
 }
 
