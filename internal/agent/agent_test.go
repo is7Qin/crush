@@ -26,6 +26,18 @@ import (
 
 func TestMain(m *testing.M) {
 	slog.SetLogLoggerLevel(slog.LevelError)
+
+	// Isolate the package from the developer's global config: it may
+	// disable the coder or task base agents, or pin models and profiles,
+	// which silently changes profile resolution and model selection
+	// here. Set once for the whole process because parallel tests cannot
+	// use t.Setenv.
+	globalDir, err := os.MkdirTemp("", "crush-agent-global")
+	if err == nil {
+		os.Setenv("CRUSH_GLOBAL_CONFIG", globalDir)
+		defer os.RemoveAll(globalDir)
+	}
+
 	m.Run()
 }
 
