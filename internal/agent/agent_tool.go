@@ -176,65 +176,7 @@ func (c *coordinator) delegateTask(ctx context.Context, params subAgentParams, p
 		Model:             model.ModelCfg.Model,
 		Prompt:            params.Prompt,
 		ResumesTaskID:     taskID,
-		Run: func(runCtx context.Context, h *task.Handle) (task.Result, error) {
-			// Every attempt delivers its own mailbox prompt: the
-			// admission prompt for the first, then each claimed
-			// message in FIFO order for successors.
-			attemptParams := params
-			attemptParams.Prompt = h.Prompt()
-			childID := h.ChildSessionID()
-			// Trusted task-run identity: the execution fence gates
-			// every child tool call, and the derived max_duration
-			// deadline below bounds its write-lease wait.
-			runCtx = tools.WithTaskRunContext(runCtx, tools.TaskRunContext{Fence: h.Fence()})
-			if prof.MaxDuration > 0 {
-				var cancel context.CancelFunc
-				runCtx, cancel = context.WithTimeout(runCtx, prof.MaxDuration)
-				defer cancel()
-			}
-			if c.taskQuestions != nil {
-				// Trusted correlation for the child's question
-				// transport: the identity comes from the task
-				// record and the manager handle, never from model
-				// arguments, so a child can only ask on behalf of
-				// its own task run.
-				runCtx = tools.WithTaskQuestionContext(runCtx, tools.TaskQuestionContext{
-					TaskID:         h.TaskID(),
-					OwnerSessionID: params.SessionID,
-					ChildSessionID: childID,
-					RunGeneration:  h.RunGeneration(),
-				})
-			}
-			resp, err := c.executeSubAgent(runCtx, attemptParams, childID)
-			if err != nil {
-				return task.Result{}, err
-			}
-			if resp.IsError {
-				// A child that observed its derived deadline failed
-				// on the profile's max_duration. Manager-level
-				// cancellation still wins in settle, so a racing
-				// cancel terminalizes as cancelled, not timeout.
-				if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-					return task.Result{}, task.ErrTimeout
-				}
-				return task.Result{}, errors.New(resp.Content)
-			}
-			out := task.Result{Text: resp.Content}
-			// Anchor the report against the revision the child read:
-			// child reads land under the child session id, so the
-			// latest anchored read is this report's revision. A child
-			// that never read file content reports no anchor.
-			if c.filetracker != nil {
-				if anchor, ok := c.filetracker.LatestAnchor(runCtx, childID); ok {
-					out.Anchor = &task.ReportAnchor{
-						Path:     anchor.Path,
-						SHA256_8: anchor.SHA8,
-						Lines:    anchor.Lines,
-					}
-				}
-			}
-			return out, nil
-		},
+		Run:               c.childAttemptRunner(params.Agent, prof, params),
 	}
 
 	t, err := c.tasks.Start(ctx, req)
