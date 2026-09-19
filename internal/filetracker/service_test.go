@@ -2,6 +2,9 @@ package filetracker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -97,6 +100,47 @@ func TestService_RecordRead_DifferentSessions(t *testing.T) {
 
 	lastRead2 := env.svc.LastReadTime(env.ctx, session2, path)
 	require.True(t, lastRead2.IsZero(), "session 2 should not see session 1's read")
+}
+
+// TestService_RecordRead_DrivelessPath covers a rooted path without
+// a volume (e.g. `\a\b` on Windows), as echoed back from
+// drive-stripped display output. The stored path must be a clean
+// relative path that round-trips through GetFileRead and anchors.
+func TestService_RecordRead_DrivelessPath(t *testing.T) {
+	env := setupTest(t)
+
+	sessionID := "driveless-session"
+	env.createSession(t, sessionID)
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	abs := filepath.Join(cwd, "sub", "file.go")
+	driveLess := strings.TrimPrefix(abs, filepath.VolumeName(abs))
+
+	env.svc.RecordRead(env.ctx, sessionID, driveLess, "content\n")
+
+	stored := relpath(driveLess)
+	require.Equal(t, filepath.Join("sub", "file.go"), stored)
+
+	got, err := env.q.GetFileRead(env.ctx, db.GetFileReadParams{
+		SessionID: sessionID,
+		Path:      stored,
+	})
+	require.NoError(t, err)
+	require.True(t, got.ContentSha256_8.Valid)
+
+	// The same file must be found again via its absolute form.
+	lastRead := env.svc.LastReadTime(env.ctx, sessionID, abs)
+	require.False(t, lastRead.IsZero())
+
+	// Anchors and listings must resolve to the real location.
+	anchor, ok := env.svc.LatestAnchor(env.ctx, sessionID)
+	require.True(t, ok)
+	require.Equal(t, abs, anchor.Path)
+
+	listed, err := env.svc.ListReadFiles(env.ctx, sessionID)
+	require.NoError(t, err)
+	require.Contains(t, listed, abs)
 }
 
 func TestService_RecordRead_DifferentPaths(t *testing.T) {

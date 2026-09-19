@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"html/template"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/shell"
 )
@@ -458,9 +456,11 @@ func truncateOutput(content string) string {
 	return TruncateOutput(content)
 }
 
+// normalizeWorkingDir renders a working directory for model-facing
+// output. Only slashes are normalized: the drive letter is kept so
+// the model echoes back complete paths. Stripping it produced
+// drive-less paths (e.g. "/a/b") that fail filepath.Rel on Windows
+// and poison filetracker lookups.
 func normalizeWorkingDir(path string) string {
-	if runtime.GOOS == "windows" {
-		path = strings.ReplaceAll(path, fsext.WindowsWorkingDirDrive(), "")
-	}
 	return filepath.ToSlash(path)
 }

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -111,7 +112,7 @@ func (s *service) LatestAnchor(ctx context.Context, sessionID string) (ReadAncho
 			continue
 		}
 		anchor := ReadAnchor{
-			Path: filepath.Join(basepath, rf.Path),
+			Path: joinBase(basepath, rf.Path),
 			SHA8: rf.ContentSha256_8.String,
 		}
 		if rf.Lines.Valid {
@@ -137,18 +138,51 @@ func (s *service) LastReadTime(ctx context.Context, sessionID, path string) time
 }
 
 func relpath(path string) string {
-	path = filepath.Clean(path)
 	basepath, err := os.Getwd()
 	if err != nil {
 		slog.Warn("Error getting basepath", "error", err)
-		return path
+		return filepath.Clean(path)
 	}
+	path = normalizeReadPath(basepath, path)
 	relpath, err := filepath.Rel(basepath, path)
 	if err != nil {
+		// The paths are not comparable (e.g. different
+		// volumes). Persist the cleaned absolute path so the
+		// stored value stays stable and lookups by absolute
+		// path still match. Never persist a half-broken
+		// rooted fragment.
 		slog.Warn("Error getting relpath", "error", err)
 		return path
 	}
 	return relpath
+}
+
+// normalizeReadPath cleans path and anchors it to basepath's volume
+// when the drive letter was dropped upstream (on Windows a rooted
+// path without a volume, e.g. `\a\b`, compares against nothing).
+// The result is absolute whenever possible so relpath can always
+// produce a clean, stable relative path.
+func normalizeReadPath(basepath, path string) string {
+	cleaned := filepath.Clean(path)
+	if runtime.GOOS == "windows" &&
+		filepath.VolumeName(cleaned) == "" &&
+		len(cleaned) > 0 && os.IsPathSeparator(cleaned[0]) {
+		cleaned = filepath.VolumeName(basepath) + cleaned
+	}
+	if abs, err := filepath.Abs(cleaned); err == nil {
+		return abs
+	}
+	return cleaned
+}
+
+// joinBase resolves a stored path against basepath. Stored paths are
+// usually relative, but the incomparable-volume fallback in relpath
+// persists absolute paths, which must be used as-is.
+func joinBase(basepath, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(basepath, path)
 }
 
 // ListReadFiles returns the paths of all files read in a session.
@@ -165,7 +199,7 @@ func (s *service) ListReadFiles(ctx context.Context, sessionID string) ([]string
 
 	paths := make([]string, 0, len(readFiles))
 	for _, rf := range readFiles {
-		paths = append(paths, filepath.Join(basepath, rf.Path))
+		paths = append(paths, joinBase(basepath, rf.Path))
 	}
 	return paths, nil
 }

@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -200,6 +202,22 @@ func TestTruncateOutputShortContent(t *testing.T) {
 	t.Parallel()
 	content := "short output"
 	require.Equal(t, content, TruncateOutput(content))
+}
+
+// TestNormalizeWorkingDir_KeepsDriveLetter guards the filetracker
+// path-normalization bug: stripping the drive letter teaches the
+// model drive-less paths that fail filepath.Rel on Windows.
+func TestNormalizeWorkingDir_KeepsDriveLetter(t *testing.T) {
+	t.Parallel()
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.Equal(t, filepath.ToSlash(cwd), normalizeWorkingDir(cwd))
+	require.Equal(t,
+		filepath.VolumeName(cwd),
+		filepath.VolumeName(filepath.FromSlash(normalizeWorkingDir(cwd))),
+		"the volume must survive normalization",
+	)
 }
 
 func TestTruncateOutputEmoji(t *testing.T) {
