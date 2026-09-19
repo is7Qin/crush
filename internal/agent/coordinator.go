@@ -1208,6 +1208,11 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 	opts := []openai.Option{
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
+		// The declared type is the Responses flavour, so
+		// force it for every model. Without this the
+		// model-name fallback routes unknown models to
+		// chat completions.
+		openai.WithResponsesAPIFunc(func(string) bool { return true }),
 	}
 	if c.cfg.Config().Options.Debug {
 		httpClient := log.NewHTTPClient()
