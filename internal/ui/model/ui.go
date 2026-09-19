@@ -737,17 +737,21 @@ func (m *UI) loadCustomCommands() tea.Cmd {
 // applyChatScroll scrolls the chat by lines and, if the selection is then
 // outside the viewport, moves it to the nearest visible edge. The selection
 // is moved rather than scrolled to so a large coalesced delta is applied in
-// full instead of being rewound to the selected item.
-func (m *UI) applyChatScroll(lines int) {
-	m.chat.ScrollBy(lines)
+// full instead of being rewound to the selected item. The returned command
+// (scrollbar hide timer, first incremental geometry warm step) must be
+// scheduled by the caller, otherwise the scrollbar never hides and scroll
+// warming never runs.
+func (m *UI) applyChatScroll(lines int) tea.Cmd {
+	cmd := m.chat.ScrollBy(lines)
 	if m.chat.SelectedItemInView() {
-		return
+		return cmd
 	}
 	if lines > 0 && m.chat.AtBottom() {
 		m.chat.SelectLast()
-		return
+		return cmd
 	}
 	m.chat.SelectNearestInView(lines < 0)
+	return cmd
 }
 
 // loadMCPrompts loads the MCP prompts asynchronously.
@@ -1235,16 +1239,24 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if msg.Y <= 0 {
-				m.chat.ScrollBy(-1)
+				if cmd := m.chat.ScrollBy(-1); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				if !m.chat.SelectedItemInView() {
 					m.chat.SelectPrev()
-					m.chat.ScrollToSelected()
+					if cmd := m.chat.ScrollToSelected(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			} else if msg.Y >= m.chat.Height()-1 {
-				m.chat.ScrollBy(1)
+				if cmd := m.chat.ScrollBy(1); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				if !m.chat.SelectedItemInView() {
 					m.chat.SelectNext()
-					m.chat.ScrollToSelected()
+					if cmd := m.chat.ScrollToSelected(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 
@@ -1328,7 +1340,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.markScrollOnly()
-			m.applyChatScroll(lines)
+			if cmd := m.applyChatScroll(lines); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	case frameGCMsg:
 		m.handleFrameGC()
@@ -1345,8 +1359,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.HideScrollbar(msg.seq)
 		}
 	case chatWarmMsg:
-		// A resize has settled; warm the message cache one batch at a time
-		// so the scrollbar recompute never blocks the UI thread.
+		// A resize has settled, or a scroll revealed the scrollbar
+		// before geometry was ready; warm the message cache one batch
+		// at a time so the scrollbar recompute never blocks the UI.
 		if m.state == uiChat {
 			cmd, done := m.chat.WarmStep(msg.seq)
 			if cmd != nil {
@@ -2969,42 +2984,64 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.chat.ToggleExpandedSelectedItem()
 			case key.Matches(msg, m.keyMap.Chat.Up):
 				m.markScrollOnly()
-				m.chat.ScrollBy(-1)
+				if cmd := m.chat.ScrollBy(-1); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				if !m.chat.SelectedItemInView() {
 					m.chat.SelectPrev()
-					m.chat.ScrollToSelected()
+					if cmd := m.chat.ScrollToSelected(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			case key.Matches(msg, m.keyMap.Chat.Down):
 				m.markScrollOnly()
-				m.chat.ScrollBy(1)
+				if cmd := m.chat.ScrollBy(1); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				if !m.chat.SelectedItemInView() {
 					m.chat.SelectNext()
-					m.chat.ScrollToSelected()
+					if cmd := m.chat.ScrollToSelected(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			case key.Matches(msg, m.keyMap.Chat.UpOneItem):
 				m.chat.SelectPrev()
-				m.chat.ScrollToSelected()
+				if cmd := m.chat.ScrollToSelected(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			case key.Matches(msg, m.keyMap.Chat.DownOneItem):
 				m.chat.SelectNext()
-				m.chat.ScrollToSelected()
+				if cmd := m.chat.ScrollToSelected(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			case key.Matches(msg, m.keyMap.Chat.HalfPageUp):
 				m.markScrollOnly()
-				m.chat.ScrollBy(-m.chat.Height() / 2)
+				if cmd := m.chat.ScrollBy(-m.chat.Height() / 2); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				m.chat.SelectFirstInView()
 			case key.Matches(msg, m.keyMap.Chat.HalfPageDown):
 				m.markScrollOnly()
-				m.chat.ScrollBy(m.chat.Height() / 2)
+				if cmd := m.chat.ScrollBy(m.chat.Height() / 2); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				m.chat.SelectLastInView()
 			case key.Matches(msg, m.keyMap.Chat.PageUp):
 				m.markScrollOnly()
-				m.chat.ScrollBy(-m.chat.Height())
+				if cmd := m.chat.ScrollBy(-m.chat.Height()); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				m.chat.SelectFirstInView()
 			case key.Matches(msg, m.keyMap.Chat.PageDown):
 				m.markScrollOnly()
-				m.chat.ScrollBy(m.chat.Height())
+				if cmd := m.chat.ScrollBy(m.chat.Height()); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				m.chat.SelectLastInView()
 			case key.Matches(msg, m.keyMap.Chat.Home):
-				m.chat.ScrollToTop()
+				if cmd := m.chat.ScrollToTop(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 				m.chat.SelectFirst()
 			case key.Matches(msg, m.keyMap.Chat.End):
 				m.chat.ScrollToBottomAndSelectLast()

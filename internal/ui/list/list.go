@@ -64,6 +64,18 @@ type List struct {
 	cache    map[Item]*listCacheEntry
 	cacheSeq uint64
 
+	// heights is the non-evicted per-item geometry memo, keyed by
+	// item pointer. Each entry is a few bytes (width, version,
+	// height) with no rendered text, so it stays proportional to
+	// the item count even on very long histories. Geometry readers
+	// consult it first: once an item is measured, later queries
+	// answer from memory even after the bounded text cache above
+	// evicts the entry, and a full TotalHeight never re-renders
+	// just to re-learn heights. Entries are pruned only when
+	// their item leaves the list (RemoveItem, SetItems) or when
+	// all geometry is dropped (width change).
+	heights map[Item]heightEntry
+
 	// freezeSuppressed marks items the list must not freeze on the
 	// next render even when their Finished() reports true. This is
 	// the §4.5.1 selection-drag escape hatch (option (a)): items
@@ -83,9 +95,12 @@ type listCacheEntry struct {
 	height   int
 }
 
-// renderedItem is the legacy view of a cached entry returned by getItem.
-type renderedItem struct {
-	content string
+// heightEntry is one row of the non-evicted geometry memo: the keys
+// that govern validity (width, version) plus the measured height.
+// No rendered text is retained.
+type heightEntry struct {
+	width   int
+	version uint64
 	height  int
 }
 
@@ -95,6 +110,7 @@ func NewList(items ...Item) *List {
 	l.items = items
 	l.selectedIdx = -1
 	l.cache = make(map[Item]*listCacheEntry)
+	l.heights = make(map[Item]heightEntry)
 	l.freezeSuppressed = make(map[Item]struct{})
 	return l
 }
@@ -147,8 +163,7 @@ func (l *List) AtBottom() bool {
 			// No need to calculate further, we're already past the viewport height
 			return false
 		}
-		item := l.getItem(idx)
-		itemHeight := item.height
+		itemHeight := l.heightAt(idx)
 		if l.gap > 0 && idx > l.offsetIdx {
 			itemHeight += l.gap
 		}
@@ -178,20 +193,26 @@ func (l *List) Len() int {
 	return len(l.items)
 }
 
+// TotalHeightReady reports whether TotalHeight can be served from
+// the memo without rendering any item. Callers that must not block
+// the frame (e.g. a draw triggered by scrolling) check this first
+// and defer the scan — via incremental Prewarm — while it is false.
+func (l *List) TotalHeightReady() bool {
+	return l.totalHeightValid
+}
+
 // TotalHeight returns the total height of all items in the list.
 // The result is cached and only recomputed when the item set or
-// viewport width changes.
+// viewport width changes. Items measured before answer from the
+// non-evicted heights memo, so a recompute after eviction only
+// renders items whose height is genuinely unknown.
 func (l *List) TotalHeight() int {
 	if l.totalHeightValid {
 		return l.totalHeightCache
 	}
 	total := 0
 	for idx := range l.items {
-		entry := l.renderItemEntry(idx)
-		if entry == nil {
-			continue
-		}
-		total += entry.height
+		total += l.heightAt(idx)
 		if l.gap > 0 && idx < len(l.items)-1 {
 			total += l.gap
 		}
@@ -203,9 +224,10 @@ func (l *List) TotalHeight() int {
 
 // Prewarm renders items in the range [from, from+batch) into the width
 // cache and returns the next index to warm (len(items) when done). It lets
-// a caller populate the per-item render cache incrementally across frames
-// so a later TotalHeight is instant instead of rendering everything at
-// once. Rendering is otherwise identical to what TotalHeight would do.
+// a caller populate the per-item render and heights memos incrementally
+// across frames so a later TotalHeight is instant instead of rendering
+// everything at once. Rendering is otherwise identical to what
+// TotalHeight would do.
 func (l *List) Prewarm(from, batch int) int {
 	if from < 0 {
 		from = 0
@@ -226,7 +248,7 @@ func (l *List) Prewarm(from, batch int) int {
 func (l *List) Overflows(height int) bool {
 	total := 0
 	for idx := len(l.items) - 1; idx >= 0; idx-- {
-		total += l.getItem(idx).height
+		total += l.heightAt(idx)
 		if l.gap > 0 && idx < len(l.items)-1 {
 			total += l.gap
 		}
@@ -263,8 +285,7 @@ func (l *List) ScrollPosition() (offsetIdx, offsetLine int) {
 func (l *List) Offset() int {
 	offset := 0
 	for idx := 0; idx < l.offsetIdx; idx++ {
-		item := l.getItem(idx)
-		offset += item.height
+		offset += l.heightAt(idx)
 		if l.gap > 0 && idx < len(l.items)-1 {
 			offset += l.gap
 		}
@@ -279,8 +300,7 @@ func (l *List) lastOffsetItem() (int, int, int) {
 	var totalHeight int
 	var idx int
 	for idx = len(l.items) - 1; idx >= 0; idx-- {
-		item := l.getItem(idx)
-		itemHeight := item.height
+		itemHeight := l.heightAt(idx)
 		if l.gap > 0 && idx < len(l.items)-1 {
 			itemHeight += l.gap
 		}
@@ -297,18 +317,37 @@ func (l *List) lastOffsetItem() (int, int, int) {
 	return idx, lineOffset, totalHeight
 }
 
-// getItem renders (if needed) and returns the item at the given index.
-// The result is served from the F6 cache when possible — see
-// renderItemEntry for the cache-key semantics.
-func (l *List) getItem(idx int) renderedItem {
+// heightAt returns the height of the item at the given index for
+// geometry queries (TotalHeight, Overflows, Offset, scrolling).
+// Render callbacks run exactly as in renderItemEntry so per-frame
+// state (focus, highlight) is discovered the same way; the
+// post-callback (width, version) is then checked against the
+// non-evicted heights memo. Hits return without touching rendered
+// text, so geometry stays render-free after the bounded text cache
+// evicts the entry. Misses render once via renderItemEntry, which
+// populates both memos.
+func (l *List) heightAt(idx int) int {
 	if idx < 0 || idx >= len(l.items) {
-		return renderedItem{}
+		return 0
+	}
+	rawItem := l.items[idx]
+	item := rawItem
+	if len(l.renderCallbacks) > 0 {
+		for _, cb := range l.renderCallbacks {
+			if it := cb(idx, l.selectedIdx, item); it != nil {
+				item = it
+			}
+		}
+	}
+	version := rawItem.Version()
+	if h, ok := l.heights[rawItem]; ok && h.width == l.width && h.version == version {
+		return h.height
 	}
 	entry := l.renderItemEntry(idx)
 	if entry == nil {
-		return renderedItem{}
+		return 0
 	}
-	return renderedItem{content: entry.content, height: entry.height}
+	return entry.height
 }
 
 // renderItemEntry returns the cache entry for the given index, populating
@@ -394,6 +433,13 @@ func (l *List) renderItemEntry(idx int) *listCacheEntry {
 	l.cacheSeq++
 	entry.lastUsed = l.cacheSeq
 	l.evictOldest()
+	// Record the geometry alongside the text so later queries
+	// answer from the non-evicted heights memo after this entry
+	// is evicted. The map is created lazily for zero-value Lists.
+	if l.heights == nil {
+		l.heights = make(map[Item]heightEntry)
+	}
+	l.heights[rawItem] = heightEntry{width: l.width, version: finalVersion, height: height}
 	return entry
 }
 
@@ -422,6 +468,9 @@ func (l *List) invalidateAll() {
 	for k := range l.cache {
 		delete(l.cache, k)
 	}
+	for k := range l.heights {
+		delete(l.heights, k)
+	}
 	l.totalHeightValid = false
 }
 
@@ -430,6 +479,7 @@ func (l *List) invalidateAll() {
 // the cache.
 func (l *List) Invalidate(item Item) {
 	delete(l.cache, item)
+	delete(l.heights, item)
 }
 
 // InvalidateFrozen drops the frozen flag (and stored content) for the
@@ -437,13 +487,14 @@ func (l *List) Invalidate(item Item) {
 // frozen-items vocabulary so external callers can express intent.
 func (l *List) InvalidateFrozen(item Item) {
 	delete(l.cache, item)
+	delete(l.heights, item)
 }
 
 // retainCacheFor drops every cache entry whose key is not in the given
 // item set. Used by SetItems to keep entries for stable items while
 // dropping entries for removed ones.
 func (l *List) retainCacheFor(items []Item) {
-	if len(l.cache) == 0 {
+	if len(l.cache) == 0 && len(l.heights) == 0 {
 		return
 	}
 	keep := make(map[Item]struct{}, len(items))
@@ -453,6 +504,11 @@ func (l *List) retainCacheFor(items []Item) {
 	for k := range l.cache {
 		if _, ok := keep[k]; !ok {
 			delete(l.cache, k)
+		}
+	}
+	for k := range l.heights {
+		if _, ok := keep[k]; !ok {
+			delete(l.heights, k)
 		}
 	}
 }
@@ -527,9 +583,9 @@ func (l *List) ScrollBy(lines int) {
 
 		// Scroll down
 		l.offsetLine += lines
-		currentItem := l.getItem(l.offsetIdx)
-		for l.offsetLine >= currentItem.height {
-			l.offsetLine -= currentItem.height
+		currentHeight := l.heightAt(l.offsetIdx)
+		for l.offsetLine >= currentHeight {
+			l.offsetLine -= currentHeight
 			if l.gap > 0 {
 				l.offsetLine = max(0, l.offsetLine-l.gap)
 			}
@@ -541,7 +597,7 @@ func (l *List) ScrollBy(lines int) {
 				l.ScrollToBottom()
 				return
 			}
-			currentItem = l.getItem(l.offsetIdx)
+			currentHeight = l.heightAt(l.offsetIdx)
 		}
 
 		lastOffsetIdx, lastOffsetLine, _ := l.lastOffsetItem()
@@ -561,8 +617,7 @@ func (l *List) ScrollBy(lines int) {
 				l.ScrollToTop()
 				break
 			}
-			prevItem := l.getItem(l.offsetIdx)
-			totalHeight := prevItem.height
+			totalHeight := l.heightAt(l.offsetIdx)
 			if l.gap > 0 {
 				totalHeight += l.gap
 			}
@@ -583,8 +638,8 @@ func (l *List) VisibleItemIndices() (startIdx, endIdx int) {
 	visibleHeight := -l.offsetLine
 
 	for currentIdx < len(l.items) {
-		item := l.getItem(currentIdx)
-		visibleHeight += item.height
+		itemHeight := l.heightAt(currentIdx)
+		visibleHeight += itemHeight
 		if l.gap > 0 {
 			visibleHeight += l.gap
 		}
@@ -732,6 +787,7 @@ func (l *List) RemoveItem(idx int) {
 	// Drop the cache entry for the removed item; entries for stable
 	// items stay valid because they are keyed by pointer, not index.
 	delete(l.cache, removed)
+	delete(l.heights, removed)
 	delete(l.freezeSuppressed, removed)
 
 	// Adjust selection if needed
@@ -811,8 +867,7 @@ func (l *List) ScrollToSelected() {
 		// Scroll so that the selected item is at the bottom
 		var totalHeight int
 		for i := l.selectedIdx; i >= 0; i-- {
-			item := l.getItem(i)
-			totalHeight += item.height
+			totalHeight += l.heightAt(i)
 			if l.gap > 0 && i < l.selectedIdx {
 				totalHeight += l.gap
 			}
@@ -999,8 +1054,8 @@ func (l *List) findItemAtY(_, y int) (itemIdx int, itemY int) {
 	currentLine := -l.offsetLine // Negative because offsetLine is how many lines are hidden
 
 	for currentIdx < len(l.items) && currentLine < l.height {
-		item := l.getItem(currentIdx)
-		itemEndLine := currentLine + item.height
+		itemHeight := l.heightAt(currentIdx)
+		itemEndLine := currentLine + itemHeight
 
 		// Check if y is within this item's visible range
 		if y >= currentLine && y < itemEndLine {

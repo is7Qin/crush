@@ -151,6 +151,13 @@ type Chat struct {
 	resizing        bool
 	resizeSettleSeq int
 	warmNext        int
+
+	// scrollWarming suppresses the scrollbar the same way while a
+	// scroll-triggered incremental warm is in flight. It is separate
+	// from resizing so the two suppressions never conflate: a scroll
+	// that reveals the scrollbar before TotalHeight is ready warms
+	// the geometry across frames instead of scanning it in one.
+	scrollWarming bool
 }
 
 // scrollbarHideDuration is how long the scrollbar remains visible after scroll activity.
@@ -207,14 +214,15 @@ func (m *Chat) Height() int {
 // rendered string and the screen's width method; area / scroll changes do not
 // invalidate it.
 func (m *Chat) Draw(scr uv.Screen, area uv.Rectangle) {
-	// Determine scrollbar visibility. Skip it entirely while resizing: the
-	// thumb needs the exact total height (O(N) after a width change), which
-	// is the dominant resize cost. It returns once the resize settles and
+	// Determine scrollbar visibility. Skip it entirely while resizing or
+	// scroll-warming: the thumb needs the exact total height (O(N) before
+	// the geometry is warmed), which is the dominant resize/scroll cost.
+	// It returns once the resize settles or the scroll warm finishes and
 	// the cache has been warmed. The needs-scrollbar test itself uses the
 	// cheap bounded overflow check.
 	listHeight := m.list.Height() - 1
 	needsScrollbar := false
-	if !m.resizing {
+	if !m.resizing && !m.scrollWarming {
 		needsScrollbar = m.list.Overflows(m.list.Height())
 	}
 
@@ -264,9 +272,9 @@ func (m *Chat) Draw(scr uv.Screen, area uv.Rectangle) {
 		drawCachedBuffer(scr, listArea, m.drawCache.buf)
 	}
 
-	// Draw scrollbar if visible and needed. Only reached when not resizing
-	// (showScrollbar requires it), so TotalHeight is already computed and
-	// cached above.
+	// Draw scrollbar if visible and needed. Only reached when neither
+	// resizing nor scroll-warming (showScrollbar requires it), so
+	// TotalHeight is already warmed and served from the memo.
 	if scrollbarWidth > 0 {
 		scrollbar := common.Scrollbar(m.com.Styles, listHeight, m.list.TotalHeight()-1, listHeight, m.list.Offset())
 		if scrollbar != "" {
@@ -347,9 +355,11 @@ func drawCachedBuffer(scr uv.Screen, area uv.Rectangle, buf uv.ScreenBuffer) {
 // BeginResize marks the chat as actively resizing so the next draws skip
 // the full-height scan (and the scrollbar), reflowing only the visible
 // items. It returns a command that, once resizing settles, starts warming
-// the cache so the scrollbar can recompute without blocking.
+// the cache so the scrollbar can recompute without blocking. A resize
+// supersedes any scroll-triggered warm in flight.
 func (m *Chat) BeginResize() tea.Cmd {
 	m.resizing = true
+	m.scrollWarming = false
 	m.resizeSettleSeq++
 	m.warmNext = 0
 	return chatWarmCmd(m.resizeSettleSeq, resizeSettleDuration)
@@ -357,16 +367,23 @@ func (m *Chat) BeginResize() tea.Cmd {
 
 // WarmStep renders the next batch of messages into the width cache and
 // returns a command to continue warming plus whether warming finished. On
-// completion the resize suppression is cleared so the next draw recomputes
-// the (now instant) total height and scrollbar. A stale seq — from a resize
-// that has since been superseded — is a no-op returning (nil, false).
+// completion both the resize and the scroll-warm suppressions are cleared
+// so the next draw recomputes the (now instant) total height and
+// scrollbar. A stale seq — from a resize or scroll that has since been
+// superseded — is a no-op returning (nil, false). Warm steps never touch
+// the scrollbar hide timer.
 func (m *Chat) WarmStep(seq int) (cmd tea.Cmd, done bool) {
 	if seq != m.resizeSettleSeq {
 		return nil, false
 	}
 	m.warmNext = m.list.Prewarm(m.warmNext, warmBatchSize)
 	if m.warmNext >= m.list.Len() {
+		// Every item is measured now: seal the total from the
+		// heights memo (no renders — all heights are known) so
+		// later TotalHeight calls are O(1).
+		_ = m.list.TotalHeight()
 		m.resizing = false
+		m.scrollWarming = false
 		return nil, true
 	}
 	return chatWarmCmd(seq, 0), false
@@ -418,6 +435,7 @@ func (m *Chat) InvalidateRenderCaches() {
 func (m *Chat) SetMessages(msgs ...chat.MessageItem) tea.Cmd {
 	m.idInxMap = make(map[string]int)
 	m.scrollbarVisible = false // Reset scrollbar visibility on new session load
+	m.scrollWarming = false    // New items obsolete any scroll warm in flight
 
 	items := make([]list.Item, len(msgs))
 	for i, msg := range msgs {
@@ -629,6 +647,11 @@ type RenderState struct {
 	Selected         int
 	Focused          bool
 	ScrollbarVisible bool
+	// Warming is true while a scroll-triggered geometry warm suppresses
+	// the scrollbar. Draw reads it, so it belongs in the frame key:
+	// otherwise a frame drawn without a scrollbar mid-warm could be
+	// served after warming finished at the same scroll position.
+	Warming bool
 	// ItemsVersion changes when any message mutates its rendered output.
 	ItemsVersion uint64
 }
@@ -644,6 +667,7 @@ func (m *Chat) RenderState() RenderState {
 		Selected:         m.Selected(),
 		Focused:          m.Focused(),
 		ScrollbarVisible: m.scrollbarVisible,
+		Warming:          m.scrollWarming,
 		ItemsVersion:     m.list.ItemsVersion(),
 	}
 }
@@ -702,6 +726,12 @@ func (m *Chat) ScrollToIndex(index int) tea.Cmd {
 }
 
 // showScrollbar makes the scrollbar visible and returns a command to hide it after timeout.
+// When the total height is not ready yet, it also starts an incremental
+// geometry warm (bounded to warmBatchSize renders per step) and
+// suppresses the scrollbar until warming finishes, so the frame that
+// follows a scroll returns immediately instead of rendering every item
+// at once. The hide timer semantics are unchanged: warming neither
+// cancels it nor arms a second one, and warm steps never touch it.
 func (m *Chat) showScrollbar() tea.Cmd {
 	// Only start timer for "default" mode
 	if m.scrollbarMode != config.ScrollbarDefault {
@@ -709,7 +739,18 @@ func (m *Chat) showScrollbar() tea.Cmd {
 	}
 	m.scrollbarVisible = true
 	m.scrollbarHideSeq++
-	return scrollbarHideCmd(m.scrollbarHideSeq)
+	hide := scrollbarHideCmd(m.scrollbarHideSeq)
+	if m.resizing || m.scrollWarming {
+		// A warm is already in flight; just restart the hide timer.
+		return hide
+	}
+	if !m.list.TotalHeightReady() {
+		m.scrollWarming = true
+		m.warmNext = 0
+		m.resizeSettleSeq++
+		return tea.Batch(hide, chatWarmCmd(m.resizeSettleSeq, 0))
+	}
+	return hide
 }
 
 // HideScrollbar hides the scrollbar if the sequence matches.
@@ -880,6 +921,7 @@ func (m *Chat) SelectNearestInView(scrolledUp bool) {
 func (m *Chat) ClearMessages() {
 	m.idInxMap = make(map[string]int)
 	m.scrollbarVisible = false
+	m.scrollWarming = false
 	m.list.SetItems()
 	m.ClearMouse()
 }
