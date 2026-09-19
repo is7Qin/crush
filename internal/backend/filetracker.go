@@ -12,7 +12,7 @@ func (b *Backend) FileTrackerRecordRead(ctx context.Context, workspaceID, sessio
 		return err
 	}
 
-	ws.FileTracker.RecordRead(ctx, sessionID, path)
+	ws.FileTracker.RecordRead(ctx, sessionID, path, "")
 	return nil
 }
 

@@ -26,6 +26,21 @@ const taskColumns = `id, owner_session_id, parent_session_id, child_session_id,
 	prompt, result, summary, error, result_truncated, prompt_tokens,
 	completion_tokens, cost, created_at, started_at, completed_at, updated_at`
 
+// taskListColumns is the list-only projection for ListByOwner. It
+// omits the result body (up to MaxResultBytes per task): the
+// Subagents dialog and the model's list tool need metadata only, so
+// selecting the body on every list refresh wastes one body per row.
+// Prompt stays because successor-attempt bookkeeping reads it from
+// list results; summary and error are one-line fields. Get keeps the
+// full projection because agent_output needs the body.
+const taskListColumns = `id, owner_session_id, parent_session_id, child_session_id,
+	parent_message_id, tool_call_id, profile, profile_generation,
+	requested_model, resolved_provider, resolved_model, fallback_models,
+	prompt_fingerprint, tool_fingerprint, run_generation, resumes_task_id,
+	message_id, terminal_generation, cost_aggregated_generation, status,
+	prompt, summary, error, result_truncated, prompt_tokens,
+	completion_tokens, cost, created_at, started_at, completed_at, updated_at`
+
 // SQLiteStore is the durable Store implementation over the shared
 // crush.db connection opened by internal/db.Connect. It adds no
 // behavior beyond the Store contract: the manager remains the single
@@ -140,10 +155,11 @@ func (s *SQLiteStore) Get(ctx context.Context, id string) (*Task, error) {
 	return t, nil
 }
 
-// ListByOwner returns copies of the owner's tasks, oldest first.
+// ListByOwner returns copies of the owner's tasks, oldest first,
+// without result bodies. Use Get for the body.
 func (s *SQLiteStore) ListByOwner(ctx context.Context, ownerSessionID string) ([]*Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+taskColumns+` FROM agent_tasks
+		`SELECT `+taskListColumns+` FROM agent_tasks
 		WHERE owner_session_id = ?
 		ORDER BY created_at ASC, id ASC`, ownerSessionID)
 	if err != nil {
@@ -153,7 +169,7 @@ func (s *SQLiteStore) ListByOwner(ctx context.Context, ownerSessionID string) ([
 
 	var out []*Task
 	for rows.Next() {
-		t, err := scanTask(rows)
+		t, err := scanListTask(rows)
 		if err != nil {
 			return nil, fmt.Errorf("list tasks for owner %s: %w", ownerSessionID, err)
 		}
@@ -196,6 +212,63 @@ func scanTask(row rowScanner) (*Task, error) {
 		&t.PromptFingerprint, &t.ToolFingerprint, &runGen, &resumes,
 		&messageID, &terminalGen, &costGen, &status,
 		&t.Prompt, &t.Result, &t.Summary, &t.Err, &truncated,
+		&t.PromptTokens, &t.CompletionTokens, &t.Cost,
+		&createdAt, &startedAt, &completedAt, &updatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	t.ParentSessionID = parentSession.String
+	t.RequestedModel = requested.String
+	t.ResumesTaskID = resumes.String
+	t.MessageID = messageID.String
+	t.ProfileGeneration = uint64(profileGen)
+	t.RunGeneration = uint64(runGen)
+	t.TerminalGeneration = uint64(terminalGen.Int64)
+	t.CostAggregatedGeneration = uint64(costGen.Int64)
+	t.Status = Status(status)
+	t.ResultTruncated = truncated != 0
+	t.CreatedAt = decodeStoredUnixNano(createdAt)
+	t.UpdatedAt = decodeStoredUnixNano(updatedAt)
+	t.StartedAt = decodeUnixNano(startedAt)
+	t.CompletedAt = decodeUnixNano(completedAt)
+	if fallbacks != "" && fallbacks != "[]" {
+		if err := json.Unmarshal([]byte(fallbacks), &t.FallbackModels); err != nil {
+			return nil, fmt.Errorf("decode fallback models for task: %w", err)
+		}
+	}
+	return &t, nil
+}
+
+// scanListTask scans one taskListColumns row: every list field with
+// the result body left empty. Its Scan order must match
+// taskListColumns exactly (taskColumns minus result).
+func scanListTask(row rowScanner) (*Task, error) {
+	var (
+		t             Task
+		parentSession sql.NullString
+		requested     sql.NullString
+		fallbacks     string
+		resumes       sql.NullString
+		messageID     sql.NullString
+		terminalGen   sql.NullInt64
+		costGen       sql.NullInt64
+		status        string
+		runGen        int64
+		profileGen    int64
+		truncated     int64
+		createdAt     int64
+		updatedAt     int64
+		startedAt     sql.NullInt64
+		completedAt   sql.NullInt64
+	)
+	err := row.Scan(
+		&t.ID, &t.OwnerSessionID, &parentSession, &t.ChildSessionID,
+		&t.ParentMessageID, &t.ToolCallID, &t.Profile, &profileGen,
+		&requested, &t.Provider, &t.Model, &fallbacks,
+		&t.PromptFingerprint, &t.ToolFingerprint, &runGen, &resumes,
+		&messageID, &terminalGen, &costGen, &status,
+		&t.Prompt, &t.Summary, &t.Err, &truncated,
 		&t.PromptTokens, &t.CompletionTokens, &t.Cost,
 		&createdAt, &startedAt, &completedAt, &updatedAt,
 	)

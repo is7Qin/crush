@@ -179,7 +179,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 		slog.Error("Error creating file history version", "error", err)
 	}
 
-	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
+	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath, content)
 
 	return fantasy.WithResponseMetadata(
 		fantasy.NewTextResponse("File created: "+filePath),
@@ -265,7 +265,7 @@ func commitFileChange(edit editContext, sessionID, filePath, oldContent, newCont
 		slog.Error("Error creating file history version", "error", err)
 	}
 
-	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
+	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath, newContent)
 	return nil
 }
 

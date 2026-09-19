@@ -474,7 +474,7 @@ func taskQuestionAnswerWire(responses []question.Answer) []proto.TaskQuestionAns
 // -- FileTracker --
 
 func (w *AppWorkspace) FileTrackerRecordRead(ctx context.Context, sessionID, path string) {
-	w.app.FileTracker.RecordRead(ctx, sessionID, path)
+	w.app.FileTracker.RecordRead(ctx, sessionID, path, "")
 }
 
 func (w *AppWorkspace) FileTrackerLastReadTime(ctx context.Context, sessionID, path string) time.Time {

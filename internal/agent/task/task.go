@@ -119,6 +119,10 @@ type TerminalUpdate struct {
 	ResultTruncated bool
 	CompletedAt     time.Time
 	Usage           UsageDelta
+	// Anchor pins the file revision the child read, resolved from
+	// the child session's own read receipts. Nil reports no anchor,
+	// which is not an error.
+	Anchor *ReportAnchor
 	// Question optionally binds the terminalization to a task
 	// question row: the terminal transaction conditionally resolves
 	// that pending row with this outcome and rolls the whole
@@ -132,6 +136,9 @@ type TerminalUpdate struct {
 type Result struct {
 	Text    string
 	Summary string
+	// Anchor pins the file revision the child read. Runners that
+	// cannot resolve read receipts leave it nil.
+	Anchor *ReportAnchor
 	// Usage is the attempt's terminal usage snapshot, aggregated
 	// into the parent session by the terminal transaction exactly
 	// once per run generation. Runners that cannot attribute usage

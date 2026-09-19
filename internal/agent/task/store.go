@@ -28,7 +28,8 @@ type Store interface {
 	Save(ctx context.Context, t *Task) error
 	// Get returns a copy of the stored task or ErrNotFound.
 	Get(ctx context.Context, id string) (*Task, error)
-	// ListByOwner returns copies of the owner's tasks, oldest first.
+	// ListByOwner returns copies of the owner's tasks, oldest first,
+	// without result bodies. Use Get for the body.
 	ListByOwner(ctx context.Context, ownerSessionID string) ([]*Task, error)
 	// ListLiveTasks returns copies of every non-terminal task,
 	// oldest first, for startup recovery.
@@ -86,13 +87,23 @@ type Store interface {
 	// AckOutbox stamps the given entries delivered at deliveredAt.
 	// Unknown ids are ignored.
 	AckOutbox(ctx context.Context, ids []string, deliveredAt time.Time) error
-	// ListInbox returns copies of the owner's undelivered inbox
-	// rows, oldest first. An empty ownerSessionID lists every
-	// undelivered row across owners.
+	// ListInbox returns copies of the owner's pending inbox rows
+	// (undelivered and unconsumed), oldest first. An empty
+	// ownerSessionID lists every pending row across owners.
 	ListInbox(ctx context.Context, ownerSessionID string) ([]*InboxEntry, error)
 	// AckInbox stamps the given rows delivered at deliveredAt.
 	// Unknown ids are ignored.
 	AckInbox(ctx context.Context, ids []string, deliveredAt time.Time) error
+	// MarkInboxConsumed stamps every row of taskID owned by
+	// ownerSessionID consumed at now, so a report the parent
+	// already pulled is never pushed and never resynced. Rows
+	// terminalized later are unaffected: consumption marks rows,
+	// not tasks.
+	MarkInboxConsumed(ctx context.Context, ownerSessionID, taskID string) error
+	// CountPendingInbox returns the owner's pending report count
+	// without loading report payloads. Consumed and delivered rows
+	// are excluded.
+	CountPendingInbox(ctx context.Context, ownerSessionID string) (int, error)
 	// BeginQuestionWait inserts row's pending question row and
 	// transitions its task attempt running -> waiting_for_input in
 	// one transaction, fenced on task id, run generation, owner
@@ -202,13 +213,16 @@ func (s *MemoryStore) Get(_ context.Context, id string) (*Task, error) {
 	return t.clone(), nil
 }
 
-// ListByOwner returns copies of the owner's tasks, oldest first.
+// ListByOwner returns copies of the owner's tasks, oldest first,
+// without result bodies. Use Get for the body.
 func (s *MemoryStore) ListByOwner(_ context.Context, ownerSessionID string) ([]*Task, error) {
 	s.mu.RLock()
 	var out []*Task
 	for _, t := range s.tasks {
 		if t.OwnerSessionID == ownerSessionID {
-			out = append(out, t.clone())
+			c := t.clone()
+			c.Result = ""
+			out = append(out, c)
 		}
 	}
 	s.mu.RUnlock()
@@ -290,7 +304,7 @@ func (s *MemoryStore) deliverLocked(t *Task, u TerminalUpdate) {
 		t.CostAggregatedGeneration = t.RunGeneration
 	}
 	s.appendOutboxUnlocked(terminalOutboxEntry(t))
-	s.appendInboxUnlocked(inboxEntryFor(t))
+	s.appendInboxUnlocked(inboxEntryFor(t, u.Anchor))
 	s.resolveQuestionsLocked(t, u)
 }
 
@@ -315,13 +329,14 @@ func (s *MemoryStore) appendInboxUnlocked(e *InboxEntry) {
 	s.inbox = append(s.inbox, &c)
 }
 
-// ListInbox returns copies of the undelivered inbox rows, oldest
-// first. An empty ownerSessionID lists every owner's rows.
+// ListInbox returns copies of the pending inbox rows (undelivered
+// and unconsumed), oldest first. An empty ownerSessionID lists
+// every owner's rows.
 func (s *MemoryStore) ListInbox(_ context.Context, ownerSessionID string) ([]*InboxEntry, error) {
 	s.mu.RLock()
 	var out []*InboxEntry
 	for _, e := range s.inbox {
-		if e.DeliveredAt.IsZero() && (ownerSessionID == "" || e.OwnerSessionID == ownerSessionID) {
+		if e.DeliveredAt.IsZero() && e.ConsumedAt.IsZero() && (ownerSessionID == "" || e.OwnerSessionID == ownerSessionID) {
 			c := *e
 			out = append(out, &c)
 		}
@@ -350,6 +365,36 @@ func (s *MemoryStore) AckInbox(_ context.Context, ids []string, deliveredAt time
 		}
 	}
 	return nil
+}
+
+// MarkInboxConsumed stamps every row of taskID owned by
+// ownerSessionID consumed, so a pulled report is never pushed and
+// never resynced. Only existing rows are marked; rows terminalized
+// later stay pending.
+func (s *MemoryStore) MarkInboxConsumed(_ context.Context, ownerSessionID, taskID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, e := range s.inbox {
+		if e.OwnerSessionID == ownerSessionID && e.TaskID == taskID && e.ConsumedAt.IsZero() {
+			e.ConsumedAt = now
+		}
+	}
+	return nil
+}
+
+// CountPendingInbox returns the owner's pending report count without
+// loading report payloads.
+func (s *MemoryStore) CountPendingInbox(_ context.Context, ownerSessionID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, e := range s.inbox {
+		if e.DeliveredAt.IsZero() && e.ConsumedAt.IsZero() && (ownerSessionID == "" || e.OwnerSessionID == ownerSessionID) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // appendOutboxUnlocked records an outbox entry unless the same

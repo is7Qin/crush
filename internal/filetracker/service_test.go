@@ -47,7 +47,7 @@ func TestService_RecordRead(t *testing.T) {
 	path := "/path/to/file.go"
 	env.createSession(t, sessionID)
 
-	env.svc.RecordRead(env.ctx, sessionID, path)
+	env.svc.RecordRead(env.ctx, sessionID, path, "")
 
 	lastRead := env.svc.LastReadTime(env.ctx, sessionID, path)
 	require.False(t, lastRead.IsZero(), "expected non-zero time after recording read")
@@ -68,14 +68,14 @@ func TestService_RecordRead_UpdatesTimestamp(t *testing.T) {
 	path := "/path/to/file.go"
 	env.createSession(t, sessionID)
 
-	env.svc.RecordRead(env.ctx, sessionID, path)
+	env.svc.RecordRead(env.ctx, sessionID, path, "")
 	firstRead := env.svc.LastReadTime(env.ctx, sessionID, path)
 	require.False(t, firstRead.IsZero())
 
 	synctest.Test(t, func(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		synctest.Wait()
-		env.svc.RecordRead(env.ctx, sessionID, path)
+		env.svc.RecordRead(env.ctx, sessionID, path, "")
 		secondRead := env.svc.LastReadTime(env.ctx, sessionID, path)
 
 		require.False(t, secondRead.Before(firstRead), "second read time should not be before first")
@@ -90,7 +90,7 @@ func TestService_RecordRead_DifferentSessions(t *testing.T) {
 	env.createSession(t, session1)
 	env.createSession(t, session2)
 
-	env.svc.RecordRead(env.ctx, session1, path)
+	env.svc.RecordRead(env.ctx, session1, path, "")
 
 	lastRead1 := env.svc.LastReadTime(env.ctx, session1, path)
 	require.False(t, lastRead1.IsZero())
@@ -106,7 +106,7 @@ func TestService_RecordRead_DifferentPaths(t *testing.T) {
 	path1, path2 := "/path/to/file1.go", "/path/to/file2.go"
 	env.createSession(t, sessionID)
 
-	env.svc.RecordRead(env.ctx, sessionID, path1)
+	env.svc.RecordRead(env.ctx, sessionID, path1, "")
 
 	lastRead1 := env.svc.LastReadTime(env.ctx, sessionID, path1)
 	require.False(t, lastRead1.IsZero())

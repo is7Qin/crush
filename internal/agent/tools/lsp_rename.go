@@ -97,7 +97,7 @@ func NewRenameTool(
 
 			if filetracker != nil && sessionID != "" {
 				for _, path := range affectedFiles {
-					filetracker.RecordRead(ctx, sessionID, path)
+					filetracker.RecordRead(ctx, sessionID, path, "")
 				}
 			}
 

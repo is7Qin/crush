@@ -244,10 +244,10 @@ type envelopeRecorder struct {
 	envs []task.TaskResultEnvelope
 }
 
-func (r *envelopeRecorder) WriteResult(_ context.Context, _ string, env task.TaskResultEnvelope) error {
+func (r *envelopeRecorder) WriteResults(_ context.Context, _ string, envs []task.TaskResultEnvelope, _ int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.envs = append(r.envs, env)
+	r.envs = append(r.envs, envs...)
 	return nil
 }
 

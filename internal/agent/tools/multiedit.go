@@ -229,7 +229,7 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 		slog.Error("Error creating file history version", "error", err)
 	}
 
-	edit.filetracker.RecordRead(edit.ctx, sessionID, params.FilePath)
+	edit.filetracker.RecordRead(edit.ctx, sessionID, params.FilePath, currentContent)
 
 	var message string
 	if len(failedEdits) > 0 {

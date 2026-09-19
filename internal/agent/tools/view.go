@@ -256,7 +256,7 @@ func NewViewTool(
 			}
 			output += "\n</file>\n"
 			output += getDiagnostics(filePath, lspManager)
-			filetracker.RecordRead(ctx, sessionID, filePath)
+			filetracker.RecordRead(ctx, sessionID, filePath, anchorContent(filePath, fileInfo.Size()))
 
 			meta := ViewResponseMetadata{
 				FilePath: filePath,
@@ -277,6 +277,25 @@ func NewViewTool(
 			), nil
 		},
 	)
+}
+
+// anchorContent returns the full file content for read anchoring,
+// or "" when the file cannot anchor a report (unreadable or larger
+// than the anchor cap). The anchor hashes the full revision, not the
+// served window, so a delivery-time re-read compares identical
+// inputs. Image reads and builtin skill reads return before this
+// point and record nothing, which is correct: they anchor no
+// revision.
+func anchorContent(filePath string, size int64) string {
+	const maxAnchorBytes = 1 << 20
+	if size > maxAnchorBytes {
+		return ""
+	}
+	full, err := os.ReadFile(filePath)
+	if err != nil || len(full) > maxAnchorBytes {
+		return ""
+	}
+	return string(full)
 }
 
 func addLineNumbers(content string, startLine int) string {

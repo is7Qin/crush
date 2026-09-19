@@ -162,7 +162,7 @@ func NewReplaceSymbolTool(
 			}
 
 			if filetracker != nil && sessionID != "" {
-				filetracker.RecordRead(ctx, sessionID, params.FilePath)
+				filetracker.RecordRead(ctx, sessionID, params.FilePath, newContent)
 			}
 
 			notifyLSPs(ctx, lspManager, params.FilePath)

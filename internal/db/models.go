@@ -36,9 +36,11 @@ type Message struct {
 }
 
 type ReadFile struct {
-	SessionID string `json:"session_id"`
-	Path      string `json:"path"`
-	ReadAt    int64  `json:"read_at"`
+	SessionID       string         `json:"session_id"`
+	Path            string         `json:"path"`
+	ReadAt          int64          `json:"read_at"`
+	ContentSha256_8 sql.NullString `json:"content_sha256_8"`
+	Lines           sql.NullInt64  `json:"lines"`
 }
 
 type Session struct {

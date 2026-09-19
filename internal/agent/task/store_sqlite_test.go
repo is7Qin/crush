@@ -129,6 +129,37 @@ func TestSQLiteStore_ListByOwnerOldestFirst(t *testing.T) {
 	require.Empty(t, empty)
 }
 
+func TestSQLiteStore_ListByOwnerOmitsResultBody(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store := connectStore(t, t.TempDir())
+
+	want := sqliteTask()
+	want.Result = "stored body the list must not read"
+	want.Summary = "one-line outcome"
+	require.NoError(t, store.Save(ctx, want))
+
+	got, err := store.ListByOwner(ctx, "owner")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	listed := got[0]
+	require.Empty(t, listed.Result, "list rows carry metadata only")
+	require.Equal(t, want.ID, listed.ID)
+	require.Equal(t, want.Status, listed.Status)
+	require.Equal(t, want.Profile, listed.Profile)
+	require.Equal(t, want.Provider, listed.Provider)
+	require.Equal(t, want.Model, listed.Model)
+	require.Equal(t, want.RunGeneration, listed.RunGeneration)
+	require.Equal(t, want.Summary, listed.Summary)
+	require.Equal(t, want.Prompt, listed.Prompt)
+	require.True(t, want.CreatedAt.Equal(listed.CreatedAt))
+	require.True(t, want.StartedAt.Equal(listed.StartedAt))
+
+	full, err := store.Get(ctx, want.ID)
+	require.NoError(t, err)
+	require.Equal(t, want.Result, full.Result, "Get keeps the full projection for agent_output")
+}
+
 func TestSQLiteStore_TerminalizeAndDeliverWinsOnce(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()

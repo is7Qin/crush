@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,7 +18,7 @@ type mockEditFileTracker struct {
 	reads    []string
 }
 
-func (m *mockEditFileTracker) RecordRead(ctx context.Context, sessionID, path string) {
+func (m *mockEditFileTracker) RecordRead(ctx context.Context, sessionID, path, content string) {
 	m.reads = append(m.reads, path)
 }
 
@@ -27,6 +28,10 @@ func (m *mockEditFileTracker) LastReadTime(ctx context.Context, sessionID, path 
 
 func (m *mockEditFileTracker) ListReadFiles(ctx context.Context, sessionID string) ([]string, error) {
 	return m.reads, nil
+}
+
+func (m *mockEditFileTracker) LatestAnchor(ctx context.Context, sessionID string) (filetracker.ReadAnchor, bool) {
+	return filetracker.ReadAnchor{}, false
 }
 
 func TestReplaceContentPreservesCRLFAndMetadata(t *testing.T) {

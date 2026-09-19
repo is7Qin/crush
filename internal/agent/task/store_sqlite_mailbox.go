@@ -194,7 +194,7 @@ func (s *SQLiteStore) CancelPendingIfLive(ctx context.Context, id string, u Term
 	if err != nil {
 		return nil, false, fmt.Errorf("cancel pending task %s: %w", id, err)
 	}
-	if err := deliverTerminalTx(ctx, tx, t, u.Usage); err != nil {
+	if err := deliverTerminalTx(ctx, tx, t, u); err != nil {
 		return nil, false, fmt.Errorf("cancel pending task %s: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx,

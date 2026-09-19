@@ -117,6 +117,13 @@ type App struct {
 	herdrClient *herdr.Client
 }
 
+// taskAutoContinue reports whether report delivery may start a
+// parent turn. It is opt-in and OFF by default: a nil or zero
+// options value never interrupts the parent.
+func taskAutoContinue(o *config.Options) bool {
+	return o != nil && o.TaskAutoContinue
+}
+
 // taskLimits maps configured options onto task manager limits. Live
 // quotas pass through as-is (non-positive means unlimited); the
 // per-model cap is defaulted by the config layer so production
@@ -192,19 +199,27 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	app.taskOutbox = task.NewOutboxNotifier(app.taskManager, app.taskEvents)
 	// Parent inbox delivery: untrusted result messages land through
 	// the message service, and the gate refuses to touch parents that
-	// were deleted or are mid-run.
-	app.taskInbox = task.NewInboxDrainer(
-		app.taskManager.Store(),
-		taskParentGate{sessions: sessions, app: app},
-		taskResultWriter{messages: messages},
-		func(ctx context.Context, owner string) error {
+	// were deleted or are mid-run. Auto-continuation is opt-in and
+	// OFF by default: without task_auto_continue delivery never
+	// starts a parent turn, and at most one continuation runs per
+	// delivered batch when it is enabled.
+	var continueParent func(context.Context, string) error
+	if taskAutoContinue(cfg.Options) {
+		continueParent = func(ctx context.Context, owner string) error {
 			if app.AgentCoordinator == nil {
 				return nil
 			}
 			_, err := app.AgentCoordinator.Continue(ctx, owner)
 			return err
-		},
+		}
+	}
+	app.taskInbox = task.NewInboxDrainer(
+		app.taskManager.Store(),
+		taskParentGate{sessions: sessions, app: app},
+		taskResultWriter{messages: messages},
+		continueParent,
 	)
+	app.taskInbox.SetWorkDir(store.WorkingDir())
 	// Bridge lifecycle events onto the task event stream and drain the
 	// owner's durable mailbox on every terminalization. Registered
 	// after both drainers exist; nothing can terminalize a task until

@@ -55,7 +55,7 @@ func (s *SQLiteStore) TerminalizeAndDeliver(ctx context.Context, id string, runG
 	if err != nil {
 		return nil, false, fmt.Errorf("terminalize task %s: %w", id, err)
 	}
-	if err := deliverTerminalTx(ctx, tx, t, u.Usage); err != nil {
+	if err := deliverTerminalTx(ctx, tx, t, u); err != nil {
 		return nil, false, fmt.Errorf("terminalize task %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -117,7 +117,7 @@ func liveStatusList() []Status {
 }
 
 const inboxColumns = `id, owner_session_id, task_id, terminal_generation,
-  payload, delivered_at, created_at`
+  payload, delivered_at, consumed_at, created_at`
 
 // deliverTerminalTx performs the durable half of a won
 // terminalization inside tx: aggregate this generation's usage into
@@ -126,7 +126,7 @@ const inboxColumns = `id, owner_session_id, task_id, terminal_generation,
 // conflict-ignore on their documented unique keys, so an interrupted
 // recovery replay can never duplicate a row. Any error aborts the
 // caller's whole terminal transaction.
-func deliverTerminalTx(ctx context.Context, tx *sql.Tx, t *Task, usage UsageDelta) error {
+func deliverTerminalTx(ctx context.Context, tx *sql.Tx, t *Task, u TerminalUpdate) error {
 	if t.ParentSessionID != "" && t.CostAggregatedGeneration != t.RunGeneration {
 		if _, err := tx.ExecContext(ctx, `UPDATE sessions
 			SET prompt_tokens = prompt_tokens + ?,
@@ -134,7 +134,7 @@ func deliverTerminalTx(ctx context.Context, tx *sql.Tx, t *Task, usage UsageDelt
 				cost = cost + ?,
 				updated_at = strftime('%s', 'now')
 			WHERE id = ?`,
-			usage.PromptTokens, usage.CompletionTokens, usage.Cost, t.ParentSessionID,
+			u.Usage.PromptTokens, u.Usage.CompletionTokens, u.Usage.Cost, t.ParentSessionID,
 		); err != nil {
 			return fmt.Errorf("aggregate parent %s usage: %w", t.ParentSessionID, err)
 		}
@@ -149,7 +149,7 @@ func deliverTerminalTx(ctx context.Context, tx *sql.Tx, t *Task, usage UsageDelt
 	if err := appendOutboxTx(ctx, tx, terminalOutboxEntry(t)); err != nil {
 		return err
 	}
-	if err := appendInboxTx(ctx, tx, inboxEntryFor(t)); err != nil {
+	if err := appendInboxTx(ctx, tx, inboxEntryFor(t, u.Anchor)); err != nil {
 		return err
 	}
 	// Recovery and shutdown semantics require that a terminalized
@@ -185,10 +185,11 @@ func appendInboxTx(ctx context.Context, tx *sql.Tx, e *InboxEntry) error {
 	return err
 }
 
-// ListInbox returns copies of the undelivered inbox rows, oldest
-// first. An empty ownerSessionID lists every owner's rows.
+// ListInbox returns copies of the pending inbox rows (undelivered
+// and unconsumed), oldest first. An empty ownerSessionID lists
+// every owner's rows.
 func (s *SQLiteStore) ListInbox(ctx context.Context, ownerSessionID string) ([]*InboxEntry, error) {
-	q := `SELECT ` + inboxColumns + ` FROM agent_task_inbox WHERE delivered_at IS NULL`
+	q := `SELECT ` + inboxColumns + ` FROM agent_task_inbox WHERE delivered_at IS NULL AND consumed_at IS NULL`
 	args := []any{}
 	if ownerSessionID != "" {
 		q += ` AND owner_session_id = ?`
@@ -233,22 +234,54 @@ func (s *SQLiteStore) AckInbox(ctx context.Context, ids []string, deliveredAt ti
 	return nil
 }
 
+// MarkInboxConsumed stamps every row of taskID owned by
+// ownerSessionID consumed, so a pulled report is never pushed and
+// never resynced. Only existing rows are marked; rows terminalized
+// later stay pending.
+func (s *SQLiteStore) MarkInboxConsumed(ctx context.Context, ownerSessionID, taskID string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE agent_task_inbox SET consumed_at = ?
+		WHERE owner_session_id = ? AND task_id = ? AND consumed_at IS NULL`,
+		time.Now().UnixNano(), ownerSessionID, taskID,
+	); err != nil {
+		return fmt.Errorf("consume task inbox: %w", err)
+	}
+	return nil
+}
+
+// CountPendingInbox returns the owner's pending report count without
+// loading report payloads.
+func (s *SQLiteStore) CountPendingInbox(ctx context.Context, ownerSessionID string) (int, error) {
+	q := `SELECT COUNT(*) FROM agent_task_inbox WHERE delivered_at IS NULL AND consumed_at IS NULL`
+	args := []any{}
+	if ownerSessionID != "" {
+		q += ` AND owner_session_id = ?`
+		args = append(args, ownerSessionID)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count task inbox: %w", err)
+	}
+	return n, nil
+}
+
 func scanInbox(row rowScanner) (*InboxEntry, error) {
 	var (
 		e           InboxEntry
 		terminalGen int64
 		deliveredAt sql.NullInt64
+		consumedAt  sql.NullInt64
 		createdAt   int64
 	)
 	err := row.Scan(
 		&e.ID, &e.OwnerSessionID, &e.TaskID, &terminalGen,
-		&e.Payload, &deliveredAt, &createdAt,
+		&e.Payload, &deliveredAt, &consumedAt, &createdAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	e.TerminalGeneration = uint64(terminalGen)
 	e.DeliveredAt = decodeUnixNano(deliveredAt)
+	e.ConsumedAt = decodeUnixNano(consumedAt)
 	e.CreatedAt = decodeStoredUnixNano(createdAt)
 	return &e, nil
 }

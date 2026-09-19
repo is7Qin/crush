@@ -397,6 +397,12 @@ type Options struct {
 	// DefaultRunningTasksPerModel.
 	RunningTasksPerModel *int `json:"running_tasks_per_model,omitempty" jsonschema:"description=Maximum number of child tasks running concurrently per provider model. Unset or non-positive falls back to 10.,default=10"`
 	RequestTimeout       *int `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
+	// TaskAutoContinue opts into starting a parent turn when a drain
+	// batch delivers subagent reports. OFF by default: delivery
+	// never creates a turn unless the user enables it, and the
+	// default surface is the cheap pending count the parent reads
+	// when it chooses to drain.
+	TaskAutoContinue bool `json:"task_auto_continue,omitempty" jsonschema:"description=Start a parent turn when subagent reports deliver. Off by default; delivery never interrupts the parent unless enabled.,default=false"`
 }
 
 // DefaultRequestTimeout bounds each LLM API request when the user has not

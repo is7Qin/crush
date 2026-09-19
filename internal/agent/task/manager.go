@@ -285,7 +285,7 @@ func (m *Manager) runAttempt(at *attemptState) {
 // snapshot rides into the terminal transaction, which aggregates it
 // into the parent exactly once for the attempt's run generation.
 func (m *Manager) settle(at *attemptState, res Result, runErr error) {
-	u := TerminalUpdate{CompletedAt: time.Now(), Summary: res.Summary, Usage: res.Usage}
+	u := TerminalUpdate{CompletedAt: time.Now(), Summary: res.Summary, Usage: res.Usage, Anchor: res.Anchor}
 	u.Result, u.ResultTruncated = TruncateResult(res.Text)
 	switch {
 	case at.cancelRequested.Load():

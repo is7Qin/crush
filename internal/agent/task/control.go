@@ -176,7 +176,11 @@ func (m *Manager) Status(ctx context.Context, callerSessionID, taskID string) (*
 }
 
 // Output returns the bounded stored result of an owned task. The bool
-// reports truncation.
+// reports truncation. A successful read marks the task's inbox rows
+// consumed, so a report the parent already pulled is never pushed
+// and never resynced. Consumption marks existing rows only: a task
+// still running has no rows, and its later terminalization still
+// delivers.
 func (m *Manager) Output(ctx context.Context, callerSessionID, taskID string) (Result, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -184,10 +188,14 @@ func (m *Manager) Output(ctx context.Context, callerSessionID, taskID string) (R
 	if err != nil {
 		return Result{}, false, err
 	}
+	if err := m.store.MarkInboxConsumed(ctx, callerSessionID, taskID); err != nil {
+		return Result{}, false, err
+	}
 	return Result{Text: t.Result, Summary: t.Summary}, t.ResultTruncated, nil
 }
 
-// List returns the caller's public tasks, oldest first. A non-empty
+// List returns the caller's public tasks, oldest first, without
+// result bodies. A non-empty
 // parentSessionID must equal the trusted caller or the request is
 // rejected. Hidden system-owned tasks (agentic_fetch) never appear:
 // the public list is scoped to owner-created call_agent tasks.

@@ -161,7 +161,7 @@ func NewWriteTool(
 				slog.Error("Error creating file history version", "error", err)
 			}
 
-			filetracker.RecordRead(ctx, sessionID, filePath)
+			filetracker.RecordRead(ctx, sessionID, filePath, params.Content)
 
 			notifyLSPs(ctx, lspManager, params.FilePath)
 

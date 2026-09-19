@@ -238,7 +238,7 @@ func (m *mockViewPermissionService) SubscribeNotifications(ctx context.Context) 
 
 type mockFileTracker struct{}
 
-func (m mockFileTracker) RecordRead(ctx context.Context, sessionID, path string) {}
+func (m mockFileTracker) RecordRead(ctx context.Context, sessionID, path, content string) {}
 
 func (m mockFileTracker) LastReadTime(ctx context.Context, sessionID, path string) time.Time {
 	return time.Time{}
@@ -246,6 +246,10 @@ func (m mockFileTracker) LastReadTime(ctx context.Context, sessionID, path strin
 
 func (m mockFileTracker) ListReadFiles(ctx context.Context, sessionID string) ([]string, error) {
 	return nil, nil
+}
+
+func (m mockFileTracker) LatestAnchor(ctx context.Context, sessionID string) (filetracker.ReadAnchor, bool) {
+	return filetracker.ReadAnchor{}, false
 }
 
 func newViewToolForTest(workingDir string) fantasy.AgentTool {

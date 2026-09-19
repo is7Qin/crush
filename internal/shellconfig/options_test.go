@@ -8,6 +8,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestOption_TaskAutoContinue(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option task-auto-continue true`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, true, opts["task_auto_continue"])
+}
+
 func TestOption_Bool(t *testing.T) {
 	t.Parallel()
 

@@ -219,7 +219,21 @@ func (c *coordinator) delegateTask(ctx context.Context, params subAgentParams, p
 				}
 				return task.Result{}, errors.New(resp.Content)
 			}
-			return task.Result{Text: resp.Content}, nil
+			out := task.Result{Text: resp.Content}
+			// Anchor the report against the revision the child read:
+			// child reads land under the child session id, so the
+			// latest anchored read is this report's revision. A child
+			// that never read file content reports no anchor.
+			if c.filetracker != nil {
+				if anchor, ok := c.filetracker.LatestAnchor(runCtx, childID); ok {
+					out.Anchor = &task.ReportAnchor{
+						Path:     anchor.Path,
+						SHA256_8: anchor.SHA8,
+						Lines:    anchor.Lines,
+					}
+				}
+			}
+			return out, nil
 		},
 	}
 

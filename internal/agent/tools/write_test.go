@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/stretchr/testify/require"
 )
 
 type mockFileTrackerService struct{}
 
-func (m mockFileTrackerService) RecordRead(ctx context.Context, sessionID, path string) {}
+func (m mockFileTrackerService) RecordRead(ctx context.Context, sessionID, path, content string) {}
 
 func (m mockFileTrackerService) LastReadTime(ctx context.Context, sessionID, path string) time.Time {
 	return time.Now()
@@ -22,6 +23,10 @@ func (m mockFileTrackerService) LastReadTime(ctx context.Context, sessionID, pat
 
 func (m mockFileTrackerService) ListReadFiles(ctx context.Context, sessionID string) ([]string, error) {
 	return nil, nil
+}
+
+func (m mockFileTrackerService) LatestAnchor(ctx context.Context, sessionID string) (filetracker.ReadAnchor, bool) {
+	return filetracker.ReadAnchor{}, false
 }
 
 func TestWriteToolWritesEmptyNewFile(t *testing.T) {

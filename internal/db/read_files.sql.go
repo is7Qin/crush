@@ -7,10 +7,11 @@ package db
 
 import (
 	"context"
+	"database/sql"
 )
 
 const getFileRead = `-- name: GetFileRead :one
-SELECT session_id, path, read_at FROM read_files
+SELECT session_id, path, read_at, content_sha256_8, lines FROM read_files
 WHERE session_id = ? AND path = ? LIMIT 1
 `
 
@@ -22,12 +23,12 @@ type GetFileReadParams struct {
 func (q *Queries) GetFileRead(ctx context.Context, arg GetFileReadParams) (ReadFile, error) {
 	row := q.queryRow(ctx, q.getFileReadStmt, getFileRead, arg.SessionID, arg.Path)
 	var i ReadFile
-	err := row.Scan(&i.SessionID, &i.Path, &i.ReadAt)
+	err := row.Scan(&i.SessionID, &i.Path, &i.ReadAt, &i.ContentSha256_8, &i.Lines)
 	return i, err
 }
 
 const listSessionReadFiles = `-- name: ListSessionReadFiles :many
-SELECT session_id, path, read_at FROM read_files
+SELECT session_id, path, read_at, content_sha256_8, lines FROM read_files
 WHERE session_id = ?
 ORDER BY read_at DESC
 `
@@ -41,7 +42,7 @@ func (q *Queries) ListSessionReadFiles(ctx context.Context, sessionID string) ([
 	items := []ReadFile{}
 	for rows.Next() {
 		var i ReadFile
-		if err := rows.Scan(&i.SessionID, &i.Path, &i.ReadAt); err != nil {
+		if err := rows.Scan(&i.SessionID, &i.Path, &i.ReadAt, &i.ContentSha256_8, &i.Lines); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -59,21 +60,29 @@ const recordFileRead = `-- name: RecordFileRead :exec
 INSERT INTO read_files (
     session_id,
     path,
-    read_at
+    read_at,
+    content_sha256_8,
+    lines
 ) VALUES (
     ?,
     ?,
-    strftime('%s', 'now')
+    strftime('%s', 'now'),
+    ?,
+    ?
 ) ON CONFLICT(path, session_id) DO UPDATE SET
-    read_at = excluded.read_at
+    read_at = excluded.read_at,
+    content_sha256_8 = excluded.content_sha256_8,
+    lines = excluded.lines
 `
 
 type RecordFileReadParams struct {
-	SessionID string `json:"session_id"`
-	Path      string `json:"path"`
+	SessionID       string         `json:"session_id"`
+	Path            string         `json:"path"`
+	ContentSha256_8 sql.NullString `json:"content_sha256_8"`
+	Lines           sql.NullInt64  `json:"lines"`
 }
 
 func (q *Queries) RecordFileRead(ctx context.Context, arg RecordFileReadParams) error {
-	_, err := q.exec(ctx, q.recordFileReadStmt, recordFileRead, arg.SessionID, arg.Path)
+	_, err := q.exec(ctx, q.recordFileReadStmt, recordFileRead, arg.SessionID, arg.Path, arg.ContentSha256_8, arg.Lines)
 	return err
 }

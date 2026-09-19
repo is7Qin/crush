@@ -28,12 +28,13 @@ func (g *fakeGate) ParentReady(context.Context, string) (bool, error) {
 type fakeWriter struct {
 	mu       sync.Mutex
 	written  []TaskResultEnvelope
+	batches  int
 	inFlight int
 	maxSeen  int
 	fail     atomic.Bool
 }
 
-func (w *fakeWriter) WriteResult(_ context.Context, _ string, env TaskResultEnvelope) error {
+func (w *fakeWriter) WriteResults(_ context.Context, _ string, envs []TaskResultEnvelope, _ int) error {
 	w.mu.Lock()
 	w.inFlight++
 	if w.inFlight > w.maxSeen {
@@ -49,7 +50,8 @@ func (w *fakeWriter) WriteResult(_ context.Context, _ string, env TaskResultEnve
 	}
 	time.Sleep(2 * time.Millisecond) // widen the overlap window
 	w.mu.Lock()
-	w.written = append(w.written, env)
+	w.written = append(w.written, envs...)
+	w.batches++
 	w.inFlight--
 	w.mu.Unlock()
 	return nil
