@@ -78,11 +78,16 @@ func GetTaskRunContextFromContext(ctx context.Context) (TaskRunContext, bool) {
 	return tr, ok
 }
 
-// exclusiveToolNames is the conservative set of ordinary tools that
-// mutate the workspace and therefore take the exclusive write lease.
+// exclusiveToolNames is the set of ordinary tools that mutate the
+// workspace through the structured file pipeline and therefore take
+// the exclusive write lease. Bash is deliberately absent: it held the
+// lease for the whole command duration, so one long-running command
+// starved every other writer into a spurious lease timeout, while its
+// writes bypass the history and filetracker state the lease guards.
+// External mutation remains safe because edits re-stat the file
+// against the last read and fail instead of corrupting.
 // Every mcp_ tool is exclusive too; see needsWriteLease.
 var exclusiveToolNames = map[string]bool{
-	BashToolName:          true,
 	EditToolName:          true,
 	MultiEditToolName:     true,
 	WriteToolName:         true,

@@ -210,12 +210,12 @@ func TestExclusiveTool_WaitIsBoundedByContextDeadline(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(held)
 
-	writer := newRecordingTool("bash")
+	writer := newRecordingTool("write")
 	tool := NewExclusiveTool(writer, key, reg)
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 
-	_, err = tool.Run(ctx, callAs("bash"))
+	_, err = tool.Run(ctx, callAs("write"))
 	require.ErrorIs(t, err, ErrLeaseTimeout)
 	require.NotErrorIs(t, err, ErrLeaseCancelled, "timeout must be distinguishable from cancellation")
 	require.Zero(t, writer.calls.Load(), "the inner tool never ran")
@@ -281,12 +281,16 @@ func TestExclusiveTool_NonExclusiveSkipsLease(t *testing.T) {
 
 func TestNeedsWriteLease(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"bash", "edit", "multiedit", "write", "lsp_rename",
-		"lsp_replace_symbol", "mcp_github_get_issue", "mcp_any"} {
+	for _, name := range []string{
+		"edit", "multiedit", "write", "lsp_rename",
+		"lsp_replace_symbol", "mcp_github_get_issue", "mcp_any",
+	} {
 		require.Truef(t, needsWriteLease(name), "%s must take the write lease", name)
 	}
-	for _, name := range []string{"view", "ls", "grep", "glob", "read_mcp_resource",
-		"list_mcp_resources", "question", "call_agent", "agent_status", "lsp_symbols"} {
+	for _, name := range []string{
+		"bash", "view", "ls", "grep", "glob", "read_mcp_resource",
+		"list_mcp_resources", "question", "call_agent", "agent_status", "lsp_symbols",
+	} {
 		require.Falsef(t, needsWriteLease(name), "%s must not take the write lease", name)
 	}
 }
@@ -311,9 +315,11 @@ func (o optionData) UnmarshalJSON([]byte) error   { return nil }
 type optionTool struct{ got fantasy.ProviderOptions }
 
 func (o *optionTool) Info() fantasy.ToolInfo { return fantasy.ToolInfo{Name: "view", Description: "d"} }
+
 func (o *optionTool) Run(context.Context, fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	return fantasy.NewTextResponse("ok"), nil
 }
+
 func (o *optionTool) ProviderOptions() fantasy.ProviderOptions {
 	return fantasy.ProviderOptions{"test": optionData("v")}
 }

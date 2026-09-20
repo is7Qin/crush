@@ -70,11 +70,11 @@ func TestExclusiveWrapOrder(t *testing.T) {
 // reaches the workspace lease.
 func TestHookDenialDoesNotAcquireLease(t *testing.T) {
 	lease := &spyLease{}
-	inner := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")}
+	inner := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("ok")}
 	wrapped := tools.WrapToolsExclusive([]fantasy.AgentTool{inner}, "ws", lease)
 	tool := wrapToolsWithHooks(wrapped, newRunner(t, `echo "no" >&2; exit 2`), false)[0]
 
-	resp, err := tool.Run(t.Context(), fantasy.ToolCall{ID: "c1", Name: "bash", Input: "{}"})
+	resp, err := tool.Run(t.Context(), fantasy.ToolCall{ID: "c1", Name: "edit", Input: "{}"})
 	require.NoError(t, err)
 	require.True(t, resp.IsError, "the hook denial surfaces as a tool error")
 	require.False(t, inner.called)
@@ -83,11 +83,11 @@ func TestHookDenialDoesNotAcquireLease(t *testing.T) {
 
 func TestHookAllowAcquiresLeaseOnceAndReleases(t *testing.T) {
 	lease := &spyLease{}
-	inner := &fakeTool{name: "bash", resp: fantasy.NewTextResponse("ok")}
+	inner := &fakeTool{name: "edit", resp: fantasy.NewTextResponse("ok")}
 	wrapped := tools.WrapToolsExclusive([]fantasy.AgentTool{inner}, "ws", lease)
 	tool := wrapToolsWithHooks(wrapped, newRunner(t, `echo '{"decision":"allow"}'`), false)[0]
 
-	_, err := tool.Run(t.Context(), fantasy.ToolCall{ID: "c2", Name: "bash", Input: "{}"})
+	_, err := tool.Run(t.Context(), fantasy.ToolCall{ID: "c2", Name: "edit", Input: "{}"})
 	require.NoError(t, err)
 	require.True(t, inner.called)
 	require.Equal(t, []string{"exclusive:ws", "exclusive-release"}, lease.calls())
