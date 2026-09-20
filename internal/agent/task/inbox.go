@@ -421,11 +421,16 @@ type ResultWriter interface {
 // InboxDrainer delivers durable parent inbox rows into owner
 // sessions. Drain is serialized per parent session and stamps
 // delivered_at only after the batch message commit succeeds. A
-// not-ready parent keeps its rows pending. Pending reports for one
+// not-ready parent keeps its rows pending and is recorded in the
+// dirty set, so the next parent-idle edge (DrainDirty/DrainIdle)
+// retries exactly that owner instead of relying on a later
+// unrelated event. Pending reports for one
 // owner are coalesced into ONE message capped at MaxBatchReports,
 // blocking-first, with the remainder left pending and named by one
 // trailing line: they share an anchor or the same drain window, with
-// one shared anchor header per distinct anchor. When a continuation
+// one shared anchor header per distinct anchor. A remainder left
+// pending by the cap re-marks the owner dirty, so its follow-up
+// drain is guaranteed. When a continuation
 // is configured it runs at most once per drain batch, outside the
 // per-parent lock, so a long model turn cannot block other drains.
 type InboxDrainer struct {
@@ -442,6 +447,14 @@ type InboxDrainer struct {
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
+	// dirty records owners with a deferred delivery: a drain
+	// skipped by the busy-parent gate, or a batch remainder left
+	// pending by the cap. Guarded by dirtyMu, never by the
+	// per-owner locks; every mark and clear below runs while the
+	// owner's drain lock is held, so a concurrent drain cannot
+	// erase a mark whose row it has not observed.
+	dirtyMu sync.Mutex
+	dirty   map[string]struct{}
 }
 
 // NewInboxDrainer returns a drainer over store delivering through
@@ -452,7 +465,7 @@ func NewInboxDrainer(store Store, gate ParentGate, writer ResultWriter, continua
 	if len(continuation) > 0 {
 		continueParent = continuation[0]
 	}
-	return &InboxDrainer{store: store, gate: gate, writer: writer, continueParent: continueParent, readFile: os.ReadFile, locks: map[string]*sync.Mutex{}}
+	return &InboxDrainer{store: store, gate: gate, writer: writer, continueParent: continueParent, readFile: os.ReadFile, locks: map[string]*sync.Mutex{}, dirty: map[string]struct{}{}}
 }
 
 // SetWorkDir sets the directory relative anchor paths resolve
@@ -460,6 +473,85 @@ func NewInboxDrainer(store Store, gate ParentGate, writer ResultWriter, continua
 // directory.
 func (d *InboxDrainer) SetWorkDir(dir string) {
 	d.workDir = dir
+}
+
+// DrainDirty delivers every owner with a deferred delivery and
+// returns how many reports were committed. It takes the dirty set
+// and clears it first, then drains each marked owner once through
+// the usual per-parent lock and gate: an owner still busy is
+// re-marked for the next idle edge, so no wake-up is ever lost and
+// none runs twice for one edge. Empty takes drain nothing and
+// continue nothing.
+func (d *InboxDrainer) DrainDirty(ctx context.Context) (int, error) {
+	owners := d.takeDirty()
+	delivered := 0
+	for _, owner := range owners {
+		n, err := d.drainOwner(ctx, owner)
+		delivered += n
+		if err != nil {
+			return delivered, err
+		}
+	}
+	return delivered, nil
+}
+
+// DrainIdle is the parent-idle transition: it delivers sessionID
+// plus every owner with a deferred delivery, each exactly once, and
+// returns how many reports were committed. One idle edge is one
+// drain batch and at most one continuation per owner that actually
+// delivered.
+func (d *InboxDrainer) DrainIdle(ctx context.Context, sessionID string) (int, error) {
+	owners := []string{}
+	seen := map[string]struct{}{}
+	if sessionID != "" {
+		owners = append(owners, sessionID)
+		seen[sessionID] = struct{}{}
+	}
+	for _, owner := range d.takeDirty() {
+		if _, ok := seen[owner]; !ok {
+			seen[owner] = struct{}{}
+			owners = append(owners, owner)
+		}
+	}
+	delivered := 0
+	for _, owner := range owners {
+		n, err := d.drainOwner(ctx, owner)
+		delivered += n
+		if err != nil {
+			return delivered, err
+		}
+	}
+	return delivered, nil
+}
+
+// markDirty records a deferred delivery for owner. Callers hold the
+// owner's drain lock.
+func (d *InboxDrainer) markDirty(owner string) {
+	d.dirtyMu.Lock()
+	defer d.dirtyMu.Unlock()
+	d.dirty[owner] = struct{}{}
+}
+
+// clearDirty drops owner's deferred delivery after a fully
+// delivered drain. Callers hold the owner's drain lock, so the mark
+// cleared here always predates any concurrent drain's observation.
+func (d *InboxDrainer) clearDirty(owner string) {
+	d.dirtyMu.Lock()
+	defer d.dirtyMu.Unlock()
+	delete(d.dirty, owner)
+}
+
+// takeDirty returns the marked owners in map order and clears the
+// set. Drains that still cannot proceed re-mark their owner.
+func (d *InboxDrainer) takeDirty() []string {
+	d.dirtyMu.Lock()
+	defer d.dirtyMu.Unlock()
+	owners := make([]string, 0, len(d.dirty))
+	for owner := range d.dirty {
+		owners = append(owners, owner)
+	}
+	d.dirty = map[string]struct{}{}
+	return owners
 }
 
 // Drain delivers ownerSessionID's pending inbox rows and returns how
@@ -497,10 +589,13 @@ func (d *InboxDrainer) Drain(ctx context.Context, ownerSessionID string) (int, e
 
 // drainOwner delivers one parent's pending rows under its lock,
 // returning 0 with no error when the parent is not ready or nothing
-// is pending. The batch commits as ONE message capped at
-// MaxBatchReports, blocking-first, and only the delivered rows are
-// acked after the commit; the remainder stays pending for the next
-// drain and a write failure leaves every row retained.
+// is pending. A not-ready parent is marked dirty while the lock is
+// held, so the next idle edge retries it. The batch commits as ONE
+// message capped at MaxBatchReports, blocking-first, and only the
+// delivered rows are acked after the commit; a remainder left
+// pending by the cap re-marks the owner dirty so its follow-up
+// drain is guaranteed, and a write failure leaves every row
+// retained. A fully delivered drain clears the mark.
 // Staleness is computed per anchor at delivery time on in-memory
 // copies, so the push path never mutates the stored report body.
 // At most one continuation runs for the batch, after the lock is
@@ -519,6 +614,9 @@ func (d *InboxDrainer) drainOwner(ctx context.Context, owner string) (int, error
 	lock.Lock()
 	ready, err := d.gate.ParentReady(ctx, owner)
 	if err != nil || !ready {
+		if err == nil {
+			d.markDirty(owner)
+		}
 		lock.Unlock()
 		return 0, err
 	}
@@ -563,6 +661,11 @@ func (d *InboxDrainer) drainOwner(ctx context.Context, owner string) (int, error
 		return 0, err
 	}
 	delivered := take
+	if pending > 0 {
+		d.markDirty(owner)
+	} else {
+		d.clearDirty(owner)
+	}
 	lock.Unlock()
 
 	if d.continueParent != nil {

@@ -231,10 +231,15 @@ func TestHandleTaskEvent_HiddenNotBridged(t *testing.T) {
 
 // idleGate is a ParentGate whose readiness the test controls: while
 // busy it reports every parent not ready, mirroring a parent mid-turn
-// whose gate must retain durable rows.
-type idleGate struct{ busy atomic.Bool }
+// whose gate must retain durable rows. calls counts ParentReady
+// probes so a test can wait for the terminal-event drain attempt.
+type idleGate struct {
+	busy  atomic.Bool
+	calls atomic.Int64
+}
 
 func (g *idleGate) ParentReady(context.Context, string) (bool, error) {
+	g.calls.Add(1)
 	return !g.busy.Load(), nil
 }
 

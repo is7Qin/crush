@@ -62,7 +62,11 @@ func (app *App) handleTaskEvent(ev task.Event) {
 // cover: a child that terminalizes while its parent is mid-turn keeps
 // its inbox row pending, and no further task event may ever arrive to
 // retry it. The parent's own terminal RunComplete is the authoritative
-// idle signal, so each such event re-attempts that session's drain.
+// idle signal, so each such event runs one idle drain for that
+// session: the session plus every owner with a deferred delivery,
+// each exactly once. A dropped drain marks its owner dirty inside
+// the drainer, so the wake-up is guaranteed rather than
+// opportunistic; owners still busy are re-marked for the next edge.
 // The event is only a wake-up hint: the per-parent drain stays
 // serialized, re-checks ParentReady (the coordinator releases the busy
 // entry before publishing), and never starts a run, so duplicate or
@@ -87,7 +91,7 @@ func (app *App) watchParentIdle() {
 				}
 				go func() {
 					dctx := context.WithoutCancel(app.globalCtx)
-					if _, err := app.taskInbox.Drain(dctx, sessionID); err != nil {
+					if _, err := app.taskInbox.DrainIdle(dctx, sessionID); err != nil {
 						slog.Warn("Failed to drain task inbox after parent run completion",
 							"owner_session_id", sessionID, "error", err)
 					}
