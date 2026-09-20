@@ -2680,9 +2680,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 
-	// Handle cancel key when agent is busy.
+	// Handle cancel key when agent is busy. A pinned retry notice also
+	// counts: retry edges deliberately refresh nothing, so the memoized
+	// busy value may hold a stale idle while the notice proves a turn
+	// is still in flight through its backoff.
 	if key.Matches(msg, m.keyMap.Chat.Cancel) {
-		if m.isAgentBusy() {
+		if m.isAgentBusy() || m.retryNotice {
 			if cmd := m.cancelAgent(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -4576,15 +4579,11 @@ func cancelTimerCmd() tea.Cmd {
 
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true
 // and starts a timer. The second press (before the timer expires) actually
-// cancels the agent.
+// cancels the agent. It deliberately consults no memoized ready state:
+// AgentCancel and AgentClearQueue are safe with no coordinator, so a stale
+// probe must never swallow a cancel.
 func (m *UI) cancelAgent() tea.Cmd {
 	if !m.hasSession() {
-		return nil
-	}
-
-	// Gate on the memoized ready state: esc is a hot key and AgentIsReady
-	// is a synchronous HTTP round-trip in client/server mode.
-	if !m.agentReady {
 		return nil
 	}
 
@@ -4599,6 +4598,10 @@ func (m *UI) cancelAgent() tea.Cmd {
 		}
 
 		m.com.Workspace.AgentCancel(m.session.ID)
+		// The cancelled run is over, backoff included: retire a pinned
+		// retry notice so its countdown does not tick against a dead
+		// turn (no terminal notification follows a cancel).
+		m.clearRetryNotice()
 		// Stop the spinning todo indicator and drop the memoized busy
 		// state the cancel just changed; the pill re-renders now from
 		// last-known state and again when the off-thread refresh (and
