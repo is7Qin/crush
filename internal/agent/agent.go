@@ -920,7 +920,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 
 			sessionLock.Lock()
-			stepMessages = cloneFantasyMessages(prepared.Messages)
+			// Hold the prepared slice without cloning it. The agent
+			// loop does not mutate it after PrepareStep returns: the
+			// system-prompt rewrite only runs when prepared.System
+			// changes, which this PrepareStep never sets, and step
+			// outputs accumulate in a separate slice. The usage
+			// estimate below only reads roles and content, never the
+			// ProviderOptions this PrepareStep mutates in place, so
+			// sharing the slice cannot shift the estimate. Cloning
+			// the whole history on every step showed up as transient
+			// memory peaks on large sessions.
+			stepMessages = prepared.Messages
 			sessionLock.Unlock()
 
 			var assistantMsg message.Message
@@ -1644,7 +1654,7 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 }
 
 func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
-	var history []fantasy.Message
+	history := make([]fantasy.Message, 0, len(msgs)+1)
 	if !a.isSubAgent {
 		history = append(history, fantasy.NewUserMessage(
 			fmt.Sprintf(
@@ -1655,27 +1665,18 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			),
 		))
 	}
-	// Collect all tool call IDs present in assistant messages, then index
-	// every tool result by its call ID. Tool results are re-emitted right
-	// after the assistant message that requested them instead of at their
-	// stored position: messages can be written to a session concurrently
-	// (e.g. resuming while a tool is still running), which interleaves
-	// user messages between a tool call and its result. LLM APIs require
-	// every tool call to be followed by its results before any other
-	// message, and strict-adjacency providers (e.g. Kimi, DeepSeek) reject
-	// the request otherwise, permanently locking the session.
-	knownToolCallIDs := make(map[string]struct{})
+	// Index every tool result by its call ID in a single pass. Tool
+	// results are re-emitted right after the assistant message that
+	// requested them instead of at their stored position: messages
+	// can be written to a session concurrently (e.g. resuming while
+	// a tool is still running), which interleaves user messages
+	// between a tool call and its result. LLM APIs require every
+	// tool call to be followed by its results before any other
+	// message, and strict-adjacency providers (e.g. Kimi, DeepSeek)
+	// reject the request otherwise, permanently locking the session.
+	toolResultsByCall := make(map[string][]fantasy.MessagePart, len(msgs))
 	for _, m := range msgs {
-		if m.Role != message.Assistant {
-			continue
-		}
-		for _, tc := range m.ToolCalls() {
-			knownToolCallIDs[tc.ID] = struct{}{}
-		}
-	}
-	toolResultsByCall := make(map[string][]fantasy.MessagePart)
-	for _, m := range msgs {
-		if m.Role != message.Tool {
+		if m.Role != message.Tool || len(m.Parts) == 0 {
 			continue
 		}
 		for _, aiMsg := range m.ToAIMessage() {
@@ -1687,13 +1688,6 @@ If not, please feel free to ignore. Again do not mention this message to the use
 					slog.Warn(
 						"Dropping unexpected non-tool-result part from tool message",
 						"part_type", fmt.Sprintf("%T", part),
-					)
-					continue
-				}
-				if _, known := knownToolCallIDs[tr.ToolCallID]; !known {
-					slog.Warn(
-						"Dropping orphaned tool result with no matching tool call",
-						"tool_call_id", tr.ToolCallID,
 					)
 					continue
 				}
@@ -1729,6 +1723,20 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		}
 	}
 
+	// Every tool call of an emitted assistant message consumed its
+	// results above, so leftovers have no matching tool call and
+	// are dropped. This replaces the old known-call-ID pre-pass:
+	// deferring the orphan check here keeps the indexing to a
+	// single pass without depending on stored message order.
+	for toolCallID, parts := range toolResultsByCall {
+		for range parts {
+			slog.Warn(
+				"Dropping orphaned tool result with no matching tool call",
+				"tool_call_id", toolCallID,
+			)
+		}
+	}
+
 	var files []fantasy.FilePart
 	for _, attachment := range attachments {
 		if attachment.IsText() {
@@ -1749,16 +1757,24 @@ If not, please feel free to ignore. Again do not mention this message to the use
 
 // filterFileParts removes fantasy.FilePart entries from a slice of message
 // parts. Used to strip image attachments from historical user messages when
-// the current model does not support them.
+// the current model does not support them. When there is nothing to strip
+// the input slice is returned as is to avoid a copy per message.
 func filterFileParts(parts []fantasy.MessagePart) []fantasy.MessagePart {
-	filtered := make([]fantasy.MessagePart, 0, len(parts))
-	for _, part := range parts {
-		if _, ok := fantasy.AsMessagePart[fantasy.FilePart](part); ok {
+	for i, part := range parts {
+		if _, ok := fantasy.AsMessagePart[fantasy.FilePart](part); !ok {
 			continue
 		}
-		filtered = append(filtered, part)
+		filtered := make([]fantasy.MessagePart, 0, len(parts)-1)
+		filtered = append(filtered, parts[:i]...)
+		for _, rest := range parts[i+1:] {
+			if _, ok := fantasy.AsMessagePart[fantasy.FilePart](rest); ok {
+				continue
+			}
+			filtered = append(filtered, rest)
+		}
+		return filtered
 	}
-	return filtered
+	return parts
 }
 
 // orphanedToolResultText is the terminal result recorded for a tool
@@ -2396,6 +2412,13 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 
 	supportsImages := largeModel.CatwalkCfg.SupportsImages
 
+	// Fast path: without media tool results there is nothing to
+	// convert, so return the input slice instead of rebuilding the
+	// whole message list. This runs on every streaming step.
+	if !hasToolResultMedia(messages) {
+		return messages
+	}
+
 	convertedMessages := make([]fantasy.Message, 0, len(messages))
 
 	for _, msg := range messages {
@@ -2469,6 +2492,26 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 	}
 
 	return convertedMessages
+}
+
+// hasToolResultMedia reports whether any tool result carries media
+// output that workaroundProviderMediaLimitations would convert.
+func hasToolResultMedia(messages []fantasy.Message) bool {
+	for _, msg := range messages {
+		if msg.Role != fantasy.MessageRoleTool {
+			continue
+		}
+		for _, part := range msg.Content {
+			toolResult, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part)
+			if !ok {
+				continue
+			}
+			if _, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](toolResult.Output); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildSummaryPrompt constructs the prompt text for session summarization.

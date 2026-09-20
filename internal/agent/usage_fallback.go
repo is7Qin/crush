@@ -33,15 +33,6 @@ func fallbackStepUsage(messages []fantasy.Message, step fantasy.StepResult) (fan
 	}, true
 }
 
-func cloneFantasyMessages(messages []fantasy.Message) []fantasy.Message {
-	cloned := make([]fantasy.Message, len(messages))
-	for i, msg := range messages {
-		cloned[i] = msg
-		cloned[i].Content = append([]fantasy.MessagePart(nil), msg.Content...)
-	}
-	return cloned
-}
-
 func estimateMessageTokens(messages []fantasy.Message) int64 {
 	var tokens int64
 	for _, msg := range messages {
