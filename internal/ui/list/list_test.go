@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -870,4 +871,58 @@ func TestList_AtBottom_TallFirstVisibleItem(t *testing.T) {
 		l.ScrollBy(1)
 		require.True(t, l.AtBottom(), "gap=%d: back at bottom after scrolling down", gap)
 	}
+}
+
+// slowTrackedItem renders after a sleep so tests can prove
+// PrewarmBudget stops on elapsed time rather than item count.
+type slowTrackedItem struct {
+	*Versioned
+	id         string
+	delay      time.Duration
+	renderHits int
+}
+
+func (s *slowTrackedItem) Render(int) string {
+	s.renderHits++
+	time.Sleep(s.delay)
+	return s.id
+}
+
+func (s *slowTrackedItem) Finished() bool { return true }
+
+// TestList_PrewarmBudget_TimeBounded proves one budget step renders
+// at least one item but stops once the budget elapses, and that
+// chaining steps converges to the exact total height.
+func TestList_PrewarmBudget_TimeBounded(t *testing.T) {
+	t.Parallel()
+
+	items := make([]Item, 4)
+	slow := make([]*slowTrackedItem, 4)
+	for i := range items {
+		it := &slowTrackedItem{Versioned: NewVersioned(), id: strconv.Itoa(i), delay: 20 * time.Millisecond}
+		slow[i] = it
+		items[i] = it
+	}
+	l := NewList(items...)
+	l.SetSize(40, 3)
+
+	next := l.PrewarmBudget(0, 6*time.Millisecond)
+	require.GreaterOrEqual(t, next, 1, "budget step must make progress")
+	require.Less(t, next, len(items), "slow items must stop on time, not run to the end")
+
+	for next < len(items) {
+		next = l.PrewarmBudget(next, 6*time.Millisecond)
+	}
+	_ = l.TotalHeight()
+	require.True(t, l.TotalHeightReady())
+	before := 0
+	for _, it := range slow {
+		before += it.renderHits
+	}
+	_ = l.TotalHeight()
+	after := 0
+	for _, it := range slow {
+		after += it.renderHits
+	}
+	require.Equal(t, before, after, "TotalHeight re-rendered after full budget warm")
 }

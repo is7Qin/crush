@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/stretchr/testify/require"
@@ -42,8 +43,8 @@ func totalCountingHits(items []*countingMessageItem) int {
 
 // TestChatScroll_WarmsGeometryIncrementally proves a scroll that reveals
 // the scrollbar never renders every item in one frame: the scroll frame
-// itself is bounded, geometry warms in warmBatchSize steps, and once warm
-// the scrollbar geometry is served from the memo with no further renders.
+// itself is bounded, geometry warms in time-budgeted steps, and once
+// warm the scrollbar geometry is served from the memo with no renders.
 func TestChatScroll_WarmsGeometryIncrementally(t *testing.T) {
 	t.Parallel()
 
@@ -82,8 +83,9 @@ func TestChatScroll_WarmsGeometryIncrementally(t *testing.T) {
 	require.Equal(t, seq, u.chat.resizeSettleSeq, "scroll during warming must not start a second warm")
 	require.Equal(t, next, u.chat.warmNext, "scroll during warming must not reset warm progress")
 
-	// Drive the scheduled warm chain to completion. Every step is
-	// bounded to one batch; the total converges to the exact height.
+	// Drive the scheduled warm chain to completion. Every step
+	// advances by at least one item and the total converges to the
+	// exact height; cheap items may all warm in one budget window.
 	want := 0
 	for _, it := range counted {
 		want += it.lines
@@ -95,12 +97,14 @@ func TestChatScroll_WarmsGeometryIncrementally(t *testing.T) {
 		c, done := u.chat.WarmStep(u.chat.resizeSettleSeq)
 		_ = c
 		steps++
-		require.LessOrEqual(t, totalCountingHits(counted)-stepBefore, warmBatchSize,
-			"warm step %d must render at most one batch", steps)
+		require.Greater(t, totalCountingHits(counted)-stepBefore, 0,
+			"warm step %d must make progress", steps)
+		require.LessOrEqual(t, totalCountingHits(counted)-stepBefore, n,
+			"warm step %d must stay within one budget window", steps)
 		if done {
 			break
 		}
-		require.Less(t, steps, n/warmBatchSize+10, "warming must converge")
+		require.LessOrEqual(t, steps, n, "warming must converge")
 	}
 	require.True(t, u.chat.list.TotalHeightReady())
 	require.False(t, u.chat.RenderState().Warming)
@@ -114,4 +118,94 @@ func TestChatScroll_WarmsGeometryIncrementally(t *testing.T) {
 	require.Equal(t, steady, totalCountingHits(counted), "ready geometry must not re-render")
 	_ = renderToBuffer(t, u.chat, 80, 20)
 	require.Equal(t, steady, totalCountingHits(counted), "steady draw must not re-render")
+}
+
+// slowMessageItem simulates a costly glamour or chroma render so a
+// test can prove a warm step stops on elapsed time, not on a fixed
+// item count. Each render sleeps longer than the whole warm budget.
+type slowMessageItem struct {
+	id         string
+	lines      int
+	renderHits int
+	delay      time.Duration
+}
+
+func (m *slowMessageItem) ID() string { return m.id }
+func (m *slowMessageItem) Render(int) string {
+	m.renderHits++
+	time.Sleep(m.delay)
+	lines := make([]string, m.lines)
+	for i := range lines {
+		lines[i] = m.id + ":" + strconv.Itoa(i)
+	}
+	return strings.Join(lines, "\n")
+}
+func (m *slowMessageItem) RawRender(width int) string { return m.Render(width) }
+func (m *slowMessageItem) Version() uint64            { return 0 }
+func (m *slowMessageItem) Finished() bool             { return true }
+
+var _ chat.MessageItem = (*slowMessageItem)(nil)
+
+// TestChatWarmStep_TimeBudgeted proves one WarmStep is bounded by
+// render work, not by a fixed item count: with per-item costs above
+// the budget it renders only the first item, yet driving the chain
+// still converges to the exact total height.
+func TestChatWarmStep_TimeBudgeted(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUI()
+	// Enough items that the viewport (20 lines) cannot have
+	// rendered them all before warming starts; otherwise the
+	// budget step would serve cache hits and prove nothing.
+	const n = 40
+	items := make([]chat.MessageItem, 0, n)
+	slow := make([]*slowMessageItem, 0, n)
+	for i := range n {
+		it := &slowMessageItem{id: "s" + strconv.Itoa(i), lines: 2, delay: 20 * time.Millisecond}
+		slow = append(slow, it)
+		items = append(items, it)
+	}
+	u.chat.SetMessages(items...)
+	u.updateLayoutAndSize()
+
+	cmd := u.chat.ScrollBy(-5)
+	require.NotNil(t, cmd, "scroll must start warming")
+	require.True(t, u.chat.scrollWarming)
+
+	// One step must stop after the budget even though items remain.
+	before := 0
+	for _, it := range slow {
+		before += it.renderHits
+	}
+	start := time.Now()
+	c, done := u.chat.WarmStep(u.chat.resizeSettleSeq)
+	elapsed := time.Since(start)
+	_ = c
+	stepRenders := 0
+	for _, it := range slow {
+		stepRenders += it.renderHits
+	}
+	stepRenders -= before
+	require.False(t, done, "one step must not finish six slow items")
+	require.LessOrEqual(t, stepRenders, 2, "slow items must stop on time, not on a fixed count")
+	require.Less(t, elapsed, 500*time.Millisecond, "one step must stay near the budget")
+
+	// The full chain still converges to the exact geometry.
+	want := 0
+	for _, it := range slow {
+		want += it.lines
+	}
+	want += u.chat.list.Gap() * (n - 1)
+	steps := 1
+	for u.chat.scrollWarming {
+		c, done := u.chat.WarmStep(u.chat.resizeSettleSeq)
+		_ = c
+		steps++
+		if done {
+			break
+		}
+		require.LessOrEqual(t, steps, n+1, "warming must converge")
+	}
+	require.True(t, u.chat.list.TotalHeightReady())
+	require.Equal(t, want, u.chat.list.TotalHeight(), "warmed geometry must be exact")
 }

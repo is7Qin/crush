@@ -2,6 +2,7 @@ package list
 
 import (
 	"strings"
+	"time"
 )
 
 // maxRenderCacheEntries bounds the F6 list-level render memo so
@@ -237,6 +238,32 @@ func (l *List) Prewarm(from, batch int) int {
 		l.renderItemEntry(idx)
 	}
 	return end
+}
+
+// PrewarmBudget renders items starting at from until budget elapses
+// and returns the next index to warm (len(items) when done). At
+// least one item renders per call so warming always converges, but
+// no call does unbounded work: costly items (glamour, chroma)
+// consume the budget after one or two renders while cheap items
+// warm many per step. Callers spread geometry measurement across
+// frames without dropping frames on slow items.
+func (l *List) PrewarmBudget(from int, budget time.Duration) int {
+	if from < 0 {
+		from = 0
+	}
+	if from >= len(l.items) {
+		return len(l.items)
+	}
+	start := time.Now()
+	idx := from
+	for idx < len(l.items) {
+		l.renderItemEntry(idx)
+		idx++
+		if time.Since(start) >= budget {
+			break
+		}
+	}
+	return idx
 }
 
 // Overflows reports whether the items' total height exceeds the given

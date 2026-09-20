@@ -53,10 +53,12 @@ func scrollbarHideCmd(seq int) tea.Cmd {
 // waits before it starts warming the message cache it skipped mid-drag.
 const resizeSettleDuration = 120 * time.Millisecond
 
-// warmBatchSize is how many messages the chat renders into the width cache
-// per warming step. Kept small so no single step blocks the UI thread for
-// more than a frame or so, even on slow-to-render items.
-const warmBatchSize = 25
+// warmBudget bounds how much render work one warming step performs.
+// A fixed item count cannot bound frame cost because one glamour or
+// chroma render can dwarf dozens of cheap ones; the step renders at
+// least one item and stops once the budget elapses, so slow items
+// cost one render per frame and cheap items warm many.
+const warmBudget = 6 * time.Millisecond
 
 // chatWarmMsg drives one incremental cache-warming step. The first one is
 // delayed until the resize settles; the rest fire immediately, one per
@@ -365,7 +367,7 @@ func (m *Chat) BeginResize() tea.Cmd {
 	return chatWarmCmd(m.resizeSettleSeq, resizeSettleDuration)
 }
 
-// WarmStep renders the next batch of messages into the width cache and
+// WarmStep measures the next messages into the width cache and
 // returns a command to continue warming plus whether warming finished. On
 // completion both the resize and the scroll-warm suppressions are cleared
 // so the next draw recomputes the (now instant) total height and
@@ -376,7 +378,7 @@ func (m *Chat) WarmStep(seq int) (cmd tea.Cmd, done bool) {
 	if seq != m.resizeSettleSeq {
 		return nil, false
 	}
-	m.warmNext = m.list.Prewarm(m.warmNext, warmBatchSize)
+	m.warmNext = m.list.PrewarmBudget(m.warmNext, warmBudget)
 	// Warming measures every item; re-apply the window per batch so
 	// the transient stays bounded instead of loading the whole
 	// history and stripping only at the end.
@@ -801,7 +803,7 @@ func (m *Chat) ScrollToIndex(index int) tea.Cmd {
 
 // showScrollbar makes the scrollbar visible and returns a command to hide it after timeout.
 // When the total height is not ready yet, it also starts an incremental
-// geometry warm (bounded to warmBatchSize renders per step) and
+// geometry warm (bounded to warmBudget of render work per step) and
 // suppresses the scrollbar until warming finishes, so the frame that
 // follows a scroll returns immediately instead of rendering every item
 // at once. The hide timer semantics are unchanged: warming neither
