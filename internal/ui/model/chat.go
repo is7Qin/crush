@@ -377,6 +377,10 @@ func (m *Chat) WarmStep(seq int) (cmd tea.Cmd, done bool) {
 		return nil, false
 	}
 	m.warmNext = m.list.Prewarm(m.warmNext, warmBatchSize)
+	// Warming measures every item; re-apply the window per batch so
+	// the transient stays bounded instead of loading the whole
+	// history and stripping only at the end.
+	m.RetainWindow()
 	if m.warmNext >= m.list.Len() {
 		// Every item is measured now: seal the total from the
 		// heights memo (no renders — all heights are known) so
@@ -384,6 +388,7 @@ func (m *Chat) WarmStep(seq int) (cmd tea.Cmd, done bool) {
 		_ = m.list.TotalHeight()
 		m.resizing = false
 		m.scrollWarming = false
+		m.RetainWindow()
 		return nil, true
 	}
 	return chatWarmCmd(seq, 0), false
@@ -411,6 +416,68 @@ func (m *Chat) SetSize(width, height int) {
 	// Re-anchor to bottom if we were pinned there before the resize.
 	if wasFollowing {
 		m.ScrollToBottom()
+	}
+}
+
+// bodyWindowMargin is how many items above and below the visible
+// window keep their decoded bodies resident. A typical terminal
+// shows well under 20 items; 32 each way covers the viewport plus
+// scroll momentum without re-fetching, while keeping retained
+// bodies a small constant. Released items reload synchronously
+// from the store on demand and render byte-identical output.
+const bodyWindowMargin = 32
+
+// RetainWindow bounds decoded-body residency to the visible window
+// plus bodyWindowMargin on each side: near items are ensured
+// loaded, finished items outside are released. Nested tool bodies
+// follow their parent. Live (unfinished) items are never released,
+// so streaming needs no store round-trip.
+func (m *Chat) RetainWindow() {
+	n := m.list.Len()
+	if n == 0 {
+		return
+	}
+	start, end := m.list.VisibleItemIndices()
+	lo := max(0, start-bodyWindowMargin)
+	hi := min(n-1, end+bodyWindowMargin)
+	for i := range n {
+		item, ok := m.list.ItemAt(i).(chat.Releasable)
+		if !ok {
+			continue
+		}
+		if i < lo || i > hi {
+			item.ReleaseBody()
+			if container, ok := item.(chat.NestedToolContainer); ok {
+				for _, nested := range container.NestedTools() {
+					if releasable, ok := nested.(chat.Releasable); ok {
+						releasable.ReleaseBody()
+					}
+				}
+			}
+		} else {
+			item.EnsureBody()
+		}
+	}
+}
+
+// LoadedBodyCount reports how many releasable items currently hold
+// their decoded body. Used by tests to assert the retention bound.
+func (m *Chat) LoadedBodyCount() int {
+	count := 0
+	for i := range m.list.Len() {
+		if releasable, ok := m.list.ItemAt(i).(chat.Releasable); ok && releasable.BodyLoaded() {
+			count++
+		}
+	}
+	return count
+}
+
+// ensureItemBody reloads a single item when a direct accessor needs
+// its content (selection, expansion, copy). Render paths ensure
+// themselves; this covers the rest.
+func ensureItemBody(item list.Item) {
+	if releasable, ok := item.(chat.Releasable); ok {
+		releasable.EnsureBody()
 	}
 }
 
@@ -450,6 +517,7 @@ func (m *Chat) SetMessages(msgs ...chat.MessageItem) tea.Cmd {
 	}
 	m.list.SetItems(items...)
 	m.ScrollToBottom()
+	m.RetainWindow()
 	return nil
 }
 
@@ -468,6 +536,7 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 		items[i] = msg
 	}
 	m.list.AppendItems(items...)
+	m.RetainWindow()
 }
 
 // UpdateNestedToolIDs updates the ID map for nested tools within a container.
@@ -688,6 +757,7 @@ func (m *Chat) Follow() bool {
 func (m *Chat) ScrollToBottom() tea.Cmd {
 	m.list.ScrollToBottom()
 	m.follow = true
+	m.RetainWindow()
 	return nil
 }
 
@@ -695,6 +765,7 @@ func (m *Chat) ScrollToBottom() tea.Cmd {
 func (m *Chat) ScrollToTop() tea.Cmd {
 	m.list.ScrollToTop()
 	m.follow = false // Disable follow mode when user scrolls up
+	m.RetainWindow()
 	return m.showScrollbar()
 }
 
@@ -708,6 +779,7 @@ func (m *Chat) ScrollBy(lines int) tea.Cmd {
 		// Scrolling down re-enables follow when we reach the bottom.
 		m.follow = true
 	}
+	m.RetainWindow()
 	return m.showScrollbar()
 }
 
@@ -715,6 +787,7 @@ func (m *Chat) ScrollBy(lines int) tea.Cmd {
 func (m *Chat) ScrollToSelected() tea.Cmd {
 	m.list.ScrollToSelected()
 	m.follow = m.AtBottom() // Disable follow mode if user scrolls up
+	m.RetainWindow()
 	return m.showScrollbar()
 }
 
@@ -722,6 +795,7 @@ func (m *Chat) ScrollToSelected() tea.Cmd {
 func (m *Chat) ScrollToIndex(index int) tea.Cmd {
 	m.list.ScrollToIndex(index)
 	m.follow = m.AtBottom() // Disable follow mode if user scrolls up
+	m.RetainWindow()
 	return m.showScrollbar()
 }
 
@@ -957,11 +1031,13 @@ func (m *Chat) MessageItem(id string) chat.MessageItem {
 	if !ok {
 		return nil
 	}
+	ensureItemBody(item)
 	return item
 }
 
 // ToggleExpandedSelectedItem expands the selected message item if it is expandable.
 func (m *Chat) ToggleExpandedSelectedItem() {
+	ensureItemBody(m.list.SelectedItem())
 	if expandable, ok := m.list.SelectedItem().(chat.Expandable); ok {
 		wasFollowing := m.follow
 		if !expandable.ToggleExpanded() {
@@ -983,6 +1059,7 @@ func (m *Chat) IsSelectedShellItem() bool {
 // ScrollSelectedShellHorizontal scrolls the selected ShellItem horizontally
 // by delta columns. No-op if the selected item is not a ShellItem.
 func (m *Chat) ScrollSelectedShellHorizontal(delta int) {
+	ensureItemBody(m.list.SelectedItem())
 	if shell, ok := m.list.SelectedItem().(*chat.ShellItem); ok {
 		shell.ScrollHorizontal(delta)
 	}
@@ -991,6 +1068,7 @@ func (m *Chat) ScrollSelectedShellHorizontal(delta int) {
 // HandleKeyMsg handles key events for the chat component.
 func (m *Chat) HandleKeyMsg(key tea.KeyMsg) (bool, tea.Cmd) {
 	if m.list.Focused() {
+		ensureItemBody(m.list.SelectedItem())
 		if handler, ok := m.list.SelectedItem().(chat.KeyEventHandler); ok {
 			return handler.HandleKeyEvent(key)
 		}
@@ -1085,6 +1163,7 @@ func (m *Chat) HandleDelayedClick(msg DelayedClickMsg) bool {
 	}
 
 	// Execute the click action (e.g., expansion).
+	ensureItemBody(m.list.SelectedItem())
 	selectedItem := m.list.SelectedItem()
 	if clickable, ok := selectedItem.(list.MouseClickable); ok {
 		handled := clickable.HandleMouseClick(ansi.MouseButton1, msg.X, msg.Y)

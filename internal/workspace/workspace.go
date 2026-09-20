@@ -140,6 +140,13 @@ type Workspace interface {
 
 	// Messages
 	ListMessages(ctx context.Context, sessionID string) ([]message.Message, error)
+	// GetMessage returns a single message by ID. The sessionID scopes
+	// the lookup for remote workspaces; local workspaces address
+	// messages globally and ignore it. The chat view uses this to
+	// reload a released message body when it scrolls back into view,
+	// so steady-state retention stays proportional to the viewport
+	// instead of the total history length.
+	GetMessage(ctx context.Context, sessionID, id string) (message.Message, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	ListAllUserMessages(ctx context.Context) ([]message.Message, error)
 

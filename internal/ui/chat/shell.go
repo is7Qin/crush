@@ -42,6 +42,17 @@ type ShellItem struct {
 	sty             *styles.Styles
 	pending         bool
 	anim            *anim.Anim
+
+	// Body-gating fields. A finished shell result keeps only its
+	// command while the (potentially large) output is released far
+	// from the viewport and reloaded on demand. srcMsgID and
+	// srcIndex locate the ShellCommand part inside the source user
+	// message for the reload.
+	loader   BodyLoader
+	released bool
+	srcMsgID string
+	srcIndex int
+	hasSrc   bool
 }
 
 var (
@@ -99,6 +110,8 @@ func (s *ShellItem) Complete(output string, exitCode int) {
 	s.replaceOutput(output)
 	s.exitCode = exitCode
 	s.pending = false
+	// Fresh live state supersedes any released snapshot.
+	s.released = false
 	s.Bump()
 }
 
@@ -108,6 +121,7 @@ func (s *ShellItem) AppendOutput(chunk string) {
 		return
 	}
 	s.output.WriteString(chunk)
+	s.released = false
 	s.Bump()
 }
 
@@ -120,6 +134,54 @@ func (s *ShellItem) replaceOutput(output string) {
 func (s *ShellItem) ID() string          { return s.id }
 func (s *ShellItem) FilterValue() string { return s.command }
 func (s *ShellItem) Finished() bool      { return !s.pending }
+
+// SetSource records which ShellCommand part of which message this
+// item renders, so a released output can be reloaded later. Called
+// at session-load time; live shell items stay pinned.
+func (s *ShellItem) SetSource(msgID string, index int) {
+	s.srcMsgID = msgID
+	s.srcIndex = index
+	s.hasSrc = true
+}
+
+// SetBodyLoader implements [Releasable].
+func (s *ShellItem) SetBodyLoader(loader BodyLoader) {
+	s.loader = loader
+}
+
+// BodyLoaded implements [Releasable].
+func (s *ShellItem) BodyLoaded() bool {
+	return !s.released
+}
+
+// ReleaseBody implements [Releasable]. Only finished items with a
+// loader and a recorded source are released; pending streams stay
+// resident.
+func (s *ShellItem) ReleaseBody() {
+	if s.released || s.loader == nil || !s.hasSrc || s.pending {
+		return
+	}
+	s.output.Reset()
+	s.released = true
+}
+
+// EnsureBody implements [Releasable].
+func (s *ShellItem) EnsureBody() {
+	if !s.released || s.loader == nil {
+		return
+	}
+	msgs, ok := s.loader()
+	if !ok || len(msgs) == 0 {
+		return
+	}
+	cmds := msgs[0].ShellCommands()
+	if s.srcIndex < 0 || s.srcIndex >= len(cmds) {
+		return
+	}
+	s.replaceOutput(cmds[s.srcIndex].Output)
+	s.exitCode = cmds[s.srcIndex].ExitCode
+	s.released = false
+}
 
 // Spinning implements [Animatable].
 func (s *ShellItem) Spinning() bool {
@@ -136,6 +198,7 @@ func (s *ShellItem) Advance() bool {
 }
 
 func (s *ShellItem) Render(width int) string {
+	s.EnsureBody()
 	innerWidth := max(0, width-MessageLeftPaddingTotal)
 	content := s.RawRender(innerWidth)
 
@@ -163,6 +226,7 @@ func (s *ShellItem) HandleMouseClick(btn ansi.MouseButton, x, y int) bool {
 func (s *ShellItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 	switch k := key.String(); k {
 	case "c", "y":
+		s.EnsureBody()
 		text := "$ " + s.command + "\n" + ansi.Strip(s.output.String())
 		return true, common.CopyToClipboard(text, "Shell output copied to clipboard")
 	case "shift+left", "H":
@@ -196,6 +260,7 @@ func (s *ShellItem) ToggleExpanded() bool {
 }
 
 func (s *ShellItem) RawRender(width int) string {
+	s.EnsureBody()
 	cappedWidth := cappedMessageWidth(width)
 
 	cmd := strings.ReplaceAll(s.command, "\n", " ")

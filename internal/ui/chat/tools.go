@@ -155,6 +155,18 @@ type baseToolMessageItem struct {
 	// If nil, uses the default: !toolCall.Finished && !canceled.
 	spinningFunc SpinningFunc
 
+	// Body-gating fields. Far from the viewport a finished tool
+	// keeps only slim metadata (IDs, names, finished state) while
+	// the bulky input and result strings are released and reloaded
+	// on demand. hadResult preserves Finished() while released.
+	// toolMsgID locates the tool message carrying the result; when
+	// empty (a result that arrived live and was never re-anchored)
+	// the result stays pinned and only the input is released.
+	loader    BodyLoader
+	released  bool
+	hadResult bool
+	toolMsgID string
+
 	sty             *styles.Styles
 	anim            *anim.Anim
 	expandedContent bool
@@ -295,6 +307,75 @@ func (t *baseToolMessageItem) SetCompact(compact bool) {
 	t.Bump()
 }
 
+// SetBodyLoader implements [Releasable].
+func (t *baseToolMessageItem) SetBodyLoader(loader BodyLoader) {
+	t.loader = loader
+}
+
+// SetToolSource records the tool message carrying this tool's
+// result, so a released result can be reloaded. Called when the
+// result arrives (session load or live update).
+func (t *baseToolMessageItem) SetToolSource(toolMsgID string) {
+	t.toolMsgID = toolMsgID
+}
+
+// BodyLoaded implements [Releasable].
+func (t *baseToolMessageItem) BodyLoaded() bool {
+	return !t.released
+}
+
+// ReleaseBody implements [Releasable]. Only finished tools with a
+// loader are released; running tools stay resident so progress
+// keeps flowing without a store round-trip per tick.
+func (t *baseToolMessageItem) ReleaseBody() {
+	if t.released || t.loader == nil {
+		return
+	}
+	if !t.Finished() {
+		return
+	}
+	t.toolCall.Input = ""
+	// The result is only released when its source is recorded;
+	// otherwise the live result could never be reloaded.
+	if t.result != nil {
+		t.hadResult = true
+		if t.toolMsgID != "" {
+			t.result = &message.ToolResult{
+				ToolCallID: t.result.ToolCallID,
+				Name:       t.result.Name,
+				IsError:    t.result.IsError,
+			}
+		}
+	}
+	t.clearCache()
+	t.released = true
+}
+
+// EnsureBody implements [Releasable].
+func (t *baseToolMessageItem) EnsureBody() {
+	if !t.released || t.loader == nil {
+		return
+	}
+	msgs, ok := t.loader()
+	if !ok || len(msgs) == 0 {
+		return
+	}
+	for _, msg := range msgs {
+		for _, tc := range msg.ToolCalls() {
+			if tc.ID == t.toolCall.ID {
+				t.toolCall = tc
+			}
+		}
+		for _, res := range msg.ToolResults() {
+			if res.ToolCallID == t.toolCall.ID {
+				result := res
+				t.result = &result
+			}
+		}
+	}
+	t.released = false
+}
+
 // ID returns the unique identifier for this tool message item.
 func (t *baseToolMessageItem) ID() string {
 	return t.toolCall.ID
@@ -322,6 +403,7 @@ func (t *baseToolMessageItem) Advance() bool {
 
 // RawRender implements [MessageItem].
 func (t *baseToolMessageItem) RawRender(width int) string {
+	t.EnsureBody()
 	toolItemWidth := width - MessageLeftPaddingTotal
 	if t.hasCappedWidth {
 		toolItemWidth = cappedMessageWidth(width)
@@ -357,6 +439,7 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 
 // Render renders the tool message item at the given width.
 func (t *baseToolMessageItem) Render(width int) string {
+	t.EnsureBody()
 	// Cache the prefixed output keyed by (width, prefix variant).
 	// Bypass the cache while spinning (RawRender output is
 	// frame-dependent) or while a highlight range is active.
@@ -401,14 +484,19 @@ func (t *baseToolMessageItem) ToolCall() message.ToolCall {
 
 // SetToolCall sets the tool call associated with this message item.
 func (t *baseToolMessageItem) SetToolCall(tc message.ToolCall) {
+	t.EnsureBody()
 	t.toolCall = tc
+	t.released = false
 	t.clearCache()
 	t.Bump()
 }
 
 // SetResult sets the tool result associated with this message item.
 func (t *baseToolMessageItem) SetResult(res *message.ToolResult) {
+	t.EnsureBody()
 	t.result = res
+	t.hadResult = res != nil
+	t.released = false
 	t.clearCache()
 	t.Bump()
 }
@@ -453,6 +541,10 @@ func (t *baseToolMessageItem) computeStatus() ToolStatus {
 
 // isSpinning returns true if the tool should show animation.
 func (t *baseToolMessageItem) isSpinning() bool {
+	// A released item is finished history by construction.
+	if t.released {
+		return false
+	}
 	if t.spinningFunc != nil {
 		return t.spinningFunc(SpinningState{
 			ToolCall: t.toolCall,
@@ -482,6 +574,12 @@ func (t *baseToolMessageItem) ToggleExpanded() bool {
 // via spinningFunc would short-circuit live ticks; we still gate
 // freezing on isSpinning to keep the contract conservative.
 func (t *baseToolMessageItem) Finished() bool {
+	if t.released {
+		if t.status == ToolStatusCanceled {
+			return true
+		}
+		return t.toolCall.Finished && t.hadResult
+	}
 	if t.isSpinning() {
 		return false
 	}
@@ -499,6 +597,7 @@ func (t *baseToolMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) b
 // HandleKeyEvent implements KeyEventHandler.
 func (t *baseToolMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 	if k := key.String(); k == "c" || k == "y" {
+		t.EnsureBody()
 		text := t.formatToolForCopy()
 		return true, common.CopyToClipboard(text, "Tool content copied to clipboard")
 	}

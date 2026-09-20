@@ -116,6 +116,16 @@ func (w *AppWorkspace) ListMessages(ctx context.Context, sessionID string) ([]me
 	return w.app.Messages.List(ctx, sessionID)
 }
 
+// GetMessage implements [Workspace.GetMessage].
+func (w *AppWorkspace) GetMessage(ctx context.Context, _, id string) (message.Message, error) {
+	// Drain any debounced update for this ID so a reload observes
+	// the latest in-memory state, mirroring [AppWorkspace.ListMessages].
+	if err := w.app.Messages.Flush(ctx, id); err != nil {
+		return message.Message{}, err
+	}
+	return w.app.Messages.Get(ctx, id)
+}
+
 func (w *AppWorkspace) ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
 	return w.app.Messages.ListUserMessages(ctx, sessionID)
 }

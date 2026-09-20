@@ -287,20 +287,51 @@ type AssistantInfoItem struct {
 	*list.Versioned
 	*cachedMessageItem
 
-	id                  string
-	message             *message.Message
+	id string
+	// info snapshots the small footer fields instead of retaining
+	// the whole message: one info item exists per assistant turn,
+	// so holding full parts here would pin every turn's decoded
+	// body for the session lifetime.
+	info                assistantInfo
 	sty                 *styles.Styles
 	cfg                 *config.Config
 	lastUserMessageTime time.Time
 }
 
+// assistantInfo is the footer-sized projection of a finished
+// assistant message.
+type assistantInfo struct {
+	finishReason  message.FinishReason
+	finishTime    int64
+	finishMessage string
+	finishDetails string
+	provider      string
+	model         string
+	prismModel    string
+	prismHyper    *float64
+	prismDollar   *float64
+}
+
 // NewAssistantInfoItem creates a new AssistantInfoItem.
 func NewAssistantInfoItem(sty *styles.Styles, message *message.Message, cfg *config.Config, lastUserMessageTime time.Time) MessageItem {
+	info := assistantInfo{
+		provider:    message.Provider,
+		model:       message.Model,
+		prismModel:  message.PrismModelName,
+		prismHyper:  message.PrismHypercreditSavings,
+		prismDollar: message.PrismDollarSavings,
+	}
+	if finishData := message.FinishPart(); finishData != nil {
+		info.finishReason = finishData.Reason
+		info.finishTime = finishData.Time
+		info.finishMessage = finishData.Message
+		info.finishDetails = finishData.Details
+	}
 	return &AssistantInfoItem{
 		Versioned:           list.NewVersioned(),
 		cachedMessageItem:   &cachedMessageItem{},
 		id:                  AssistantInfoID(message.ID),
-		message:             message,
+		info:                info,
 		sty:                 sty,
 		cfg:                 cfg,
 		lastUserMessageTime: lastUserMessageTime,
@@ -350,40 +381,39 @@ func (a *AssistantInfoItem) Render(width int) string {
 }
 
 func (a *AssistantInfoItem) renderContent(width int) string {
-	finishData := a.message.FinishPart()
-	if finishData == nil {
+	if a.info.finishReason == "" {
 		return ""
 	}
 	// The final turn of a prompt keeps the full footer (duration and
 	// separator line); intermediate turns render a compact header.
-	isFinalTurn := finishData.Reason == message.FinishReasonEndTurn
+	isFinalTurn := a.info.finishReason == message.FinishReasonEndTurn
 
 	icon := a.sty.Messages.AssistantInfoIcon.Render(styles.ModelIcon)
 	mainModelName := "Unknown Model"
-	if model := a.cfg.GetModel(a.message.Provider, a.message.Model); model != nil {
+	if model := a.cfg.GetModel(a.info.provider, a.info.model); model != nil {
 		mainModelName = model.Name
 	}
 	modelFormatted := a.sty.Messages.AssistantInfoModel.Render(mainModelName)
 	// A Prism-routed turn shows the model that actually served the
 	// request, with the arrow and any savings suffix subdued.
-	if a.message.PrismModelName != "" {
-		routedModel := a.sty.Messages.AssistantInfoModel.Render(a.message.PrismModelName)
+	if a.info.prismModel != "" {
+		routedModel := a.sty.Messages.AssistantInfoModel.Render(a.info.prismModel)
 		arrow := a.sty.Messages.AssistantInfoProvider.Render("→")
 		modelFormatted = fmt.Sprintf("%s %s %s", modelFormatted, arrow, routedModel)
 	}
-	savings := prismSavingsSuffix(a.sty, a.message)
+	savings := prismSavingsSuffix(a.sty, a.info.prismHyper, a.info.prismDollar)
 	if !isFinalTurn {
 		if savings != "" {
 			return fmt.Sprintf("%s %s %s", icon, modelFormatted, savings)
 		}
 		return fmt.Sprintf("%s %s", icon, modelFormatted)
 	}
-	providerName := a.message.Provider
-	if providerConfig, ok := a.cfg.Providers.Get(a.message.Provider); ok {
+	providerName := a.info.provider
+	if providerConfig, ok := a.cfg.Providers.Get(a.info.provider); ok {
 		providerName = providerConfig.Name
 	}
 	provider := a.sty.Messages.AssistantInfoProvider.Render(fmt.Sprintf("via %s", providerName))
-	duration := time.Unix(finishData.Time, 0).Sub(a.lastUserMessageTime)
+	duration := time.Unix(a.info.finishTime, 0).Sub(a.lastUserMessageTime)
 	infoMsg := a.sty.Messages.AssistantInfoDuration.Render(fmt.Sprintf("in %s", duration))
 	assistant := fmt.Sprintf("%s %s %s %s", icon, modelFormatted, provider, infoMsg)
 	if savings != "" {
@@ -402,14 +432,14 @@ func cappedMessageWidth(availableWidth int) int {
 // symbol carries the sidebar's hypercredit color; the rest is subdued
 // like the provider. Hypercredits are preferred over dollars when both
 // are present, matching Hyper's either/or credit model.
-func prismSavingsSuffix(sty *styles.Styles, msg *message.Message) string {
+func prismSavingsSuffix(sty *styles.Styles, hyper, dollar *float64) string {
 	switch {
-	case msg.PrismHypercreditSavings != nil:
+	case hyper != nil:
 		icon := sty.Messages.SubduedHypercreditIcon.Render(styles.HypercreditIcon)
-		rest := sty.Messages.AssistantInfoProvider.Render(fmt.Sprintf(" %s Saved", formatHypercreditSavings(*msg.PrismHypercreditSavings)))
+		rest := sty.Messages.AssistantInfoProvider.Render(fmt.Sprintf(" %s Saved", formatHypercreditSavings(*hyper)))
 		return icon + rest
-	case msg.PrismDollarSavings != nil:
-		return sty.Messages.AssistantInfoProvider.Render(fmt.Sprintf("• $%.2f Saved", *msg.PrismDollarSavings))
+	case dollar != nil:
+		return sty.Messages.AssistantInfoProvider.Render(fmt.Sprintf("• $%.2f Saved", *dollar))
 	default:
 		return ""
 	}
@@ -434,9 +464,19 @@ func ExtractMessageItems(sty *styles.Styles, msg *message.Message, toolResults m
 	case message.User:
 		// Reconstruct shell command items from ShellCommand parts.
 		var items []MessageItem
+		shellIndex := 0
 		for _, part := range msg.Parts {
 			if sc, ok := part.(message.ShellCommand); ok {
-				items = append(items, NewShellItem(sty, sc.Command, sc.Output, sc.ExitCode))
+				item := NewShellItem(sty, sc.Command, sc.Output, sc.ExitCode)
+				// Record the source part so a released output can
+				// be reloaded from the store later. The index
+				// counts ShellCommand parts, matching
+				// Message.ShellCommands.
+				if shell, ok := item.(*ShellItem); ok {
+					shell.SetSource(msg.ID, shellIndex)
+				}
+				shellIndex++
+				items = append(items, item)
 			}
 		}
 		if len(items) > 0 {

@@ -31,6 +31,14 @@ type UserMessageItem struct {
 	attachments *attachments.Renderer
 	message     *message.Message
 	sty         *styles.Styles
+
+	// Body-gating fields, mirroring AssistantMessageItem: the
+	// decoded message is released far from the viewport and
+	// reloaded on demand. User messages are immutable once
+	// submitted, so any resident state is releasable.
+	bodyID   string
+	loader   BodyLoader
+	released bool
 }
 
 // NewUserMessageItem creates a new UserMessageItem.
@@ -43,8 +51,54 @@ func NewUserMessageItem(sty *styles.Styles, message *message.Message, attachment
 		focusableMessageItem:     newFocusableMessageItem(v),
 		attachments:              attachments,
 		message:                  message,
+		bodyID:                   message.ID,
 		sty:                      sty,
 	}
+}
+
+// SetMessage replaces the underlying message with fresh state,
+// clearing any released snapshot.
+func (m *UserMessageItem) SetMessage(msg *message.Message) {
+	m.message = msg
+	m.bodyID = msg.ID
+	m.released = false
+	m.clearCache()
+	m.Bump()
+}
+
+// SetBodyLoader implements [Releasable].
+func (m *UserMessageItem) SetBodyLoader(loader BodyLoader) {
+	m.loader = loader
+}
+
+// BodyLoaded implements [Releasable].
+func (m *UserMessageItem) BodyLoaded() bool {
+	return !m.released
+}
+
+// ReleaseBody implements [Releasable].
+func (m *UserMessageItem) ReleaseBody() {
+	if m.released || m.loader == nil || m.message == nil {
+		return
+	}
+	m.bodyID = m.message.ID
+	m.message = nil
+	m.clearCache()
+	m.released = true
+}
+
+// EnsureBody implements [Releasable].
+func (m *UserMessageItem) EnsureBody() {
+	if !m.released || m.loader == nil {
+		return
+	}
+	msgs, ok := m.loader()
+	if !ok || len(msgs) == 0 {
+		return
+	}
+	m.message = &msgs[0]
+	m.bodyID = m.message.ID
+	m.released = false
 }
 
 // Finished implements list.Item. User messages are immutable once
@@ -55,6 +109,10 @@ func (m *UserMessageItem) Finished() bool {
 
 // RawRender implements [MessageItem].
 func (m *UserMessageItem) RawRender(width int) string {
+	m.EnsureBody()
+	if m.message == nil {
+		return bodyUnavailableText
+	}
 	cappedWidth := cappedMessageWidth(width)
 
 	content, height, ok := m.getCachedRender(cappedWidth)
@@ -156,6 +214,9 @@ func (m *UserMessageItem) Render(width int) string {
 
 // ID implements MessageItem.
 func (m *UserMessageItem) ID() string {
+	if m.released {
+		return m.bodyID
+	}
 	return m.message.ID
 }
 
@@ -176,6 +237,10 @@ func (m *UserMessageItem) renderAttachments(width int) string {
 // HandleKeyEvent implements KeyEventHandler.
 func (m *UserMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 	if k := key.String(); k == "c" || k == "y" {
+		m.EnsureBody()
+		if m.message == nil {
+			return false, nil
+		}
 		text := m.message.Content().Text
 		return true, common.CopyToClipboard(text, "Message copied to clipboard")
 	}

@@ -184,6 +184,16 @@ type AssistantMessageItem struct {
 	thinkingViewMode  thinkingViewMode
 	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
 
+	// Body-gating fields. The decoded message is released when the
+	// item sits far from the viewport and reloaded via loader when
+	// it scrolls back, so residency stays proportional to the
+	// viewport instead of the history length. bodyID and
+	// bodyFinished preserve ID()/Finished() while released.
+	bodyID       string
+	bodyFinished bool
+	loader       BodyLoader
+	released     bool
+
 	// Incremental FNV-64a hash of the thinking text. Avoids
 	// re-hashing the entire accumulated text on every streaming
 	// tick. thinkingHashSample holds a short prefix of the hashed
@@ -219,6 +229,7 @@ type AssistantMessageItem struct {
 var _ Expandable = (*AssistantMessageItem)(nil)
 
 // NewAssistantMessageItem creates a new AssistantMessageItem.
+// NewAssistantMessageItem creates a new AssistantMessageItem.
 func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) MessageItem {
 	v := list.NewVersioned()
 	a := &AssistantMessageItem{
@@ -227,6 +238,8 @@ func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) Messa
 		cachedMessageItem:        &cachedMessageItem{},
 		focusableMessageItem:     newFocusableMessageItem(v),
 		message:                  message,
+		bodyID:                   message.ID,
+		bodyFinished:             message.IsFinished(),
 		sty:                      sty,
 	}
 
@@ -247,6 +260,11 @@ func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) Messa
 
 // Spinning implements [Animatable].
 func (a *AssistantMessageItem) Spinning() bool {
+	// A released item is finished history by construction; only
+	// resident items can show a running animation.
+	if a.released {
+		return false
+	}
 	return a.isSpinning()
 }
 
@@ -267,11 +285,63 @@ func (a *AssistantMessageItem) Advance() bool {
 
 // ID implements MessageItem.
 func (a *AssistantMessageItem) ID() string {
+	if a.released {
+		return a.bodyID
+	}
 	return a.message.ID
+}
+
+// SetBodyLoader implements [Releasable].
+func (a *AssistantMessageItem) SetBodyLoader(loader BodyLoader) {
+	a.loader = loader
+}
+
+// BodyLoaded implements [Releasable].
+func (a *AssistantMessageItem) BodyLoaded() bool {
+	return !a.released
+}
+
+// ReleaseBody implements [Releasable]. Only finished, non-spinning
+// items with a loader are released; live streams stay resident so
+// deltas keep flowing without a store round-trip per tick.
+func (a *AssistantMessageItem) ReleaseBody() {
+	if a.released || a.loader == nil || a.message == nil {
+		return
+	}
+	if !a.message.IsFinished() || a.isSpinning() {
+		return
+	}
+	a.bodyID = a.message.ID
+	a.bodyFinished = true
+	a.message = nil
+	a.clearCache()
+	a.released = true
+}
+
+// EnsureBody implements [Releasable].
+func (a *AssistantMessageItem) EnsureBody() {
+	if !a.released || a.loader == nil {
+		return
+	}
+	msgs, ok := a.loader()
+	if !ok || len(msgs) == 0 {
+		return
+	}
+	// Restore internally rather than via SetMessage: the version
+	// must not bump, so a valid list-level memo keeps serving the
+	// identical bytes it rendered before the release.
+	a.message = &msgs[0]
+	a.bodyID = a.message.ID
+	a.bodyFinished = a.message.IsFinished()
+	a.released = false
 }
 
 // RawRender implements [MessageItem].
 func (a *AssistantMessageItem) RawRender(width int) string {
+	a.EnsureBody()
+	if a.message == nil {
+		return bodyUnavailableText
+	}
 	cappedWidth := cappedMessageWidth(width)
 
 	var spinner string
@@ -293,6 +363,10 @@ func (a *AssistantMessageItem) RawRender(width int) string {
 
 // Render implements MessageItem.
 func (a *AssistantMessageItem) Render(width int) string {
+	a.EnsureBody()
+	if a.message == nil {
+		return bodyUnavailableText
+	}
 	// XXX: Here, we're manually applying the focused/blurred styles because
 	// using lipgloss.Render can degrade performance for long messages due to
 	// it's wrapping logic.
@@ -671,8 +745,17 @@ func (a *AssistantMessageItem) isSpinning() bool {
 // sub-section caches whose source text or extras changed are
 // invalidated; the others survive and serve cache hits on the next
 // RawRender.
+// SetMessage is used to update the underlying message. Only the
+// sub-section caches whose source text or extras changed are
+// invalidated; the others survive and serve cache hits on the next
+// RawRender.
 func (a *AssistantMessageItem) SetMessage(msg *message.Message) {
 	a.message = msg
+	a.bodyID = msg.ID
+	a.bodyFinished = msg.IsFinished()
+	// Fresh state supersedes any released snapshot: the item now
+	// carries a live body again.
+	a.released = false
 	// Bump the F6 version even if the underlying *message.Message
 	// pointer is identical: callers may have mutated the message in
 	// place (delta append) and we cannot tell from here. The
@@ -695,6 +778,9 @@ func (a *AssistantMessageItem) SetMessage(msg *message.Message) {
 // fully terminal. The list cache invalidates the entry on the next
 // version bump if anything (focus, highlight, expansion) changes.
 func (a *AssistantMessageItem) Finished() bool {
+	if a.released {
+		return a.bodyFinished
+	}
 	return a.message.IsFinished() && !a.isSpinning()
 }
 
@@ -729,6 +815,10 @@ func (a *AssistantMessageItem) clearCache() {
 // there is nothing to expand, and mutating the view mode would
 // thrash the thinking-section cache key for no visible benefit.
 func (a *AssistantMessageItem) ToggleExpanded() bool {
+	a.EnsureBody()
+	if a.message == nil {
+		return a.thinkingViewMode != thinkingCollapsed
+	}
 	if strings.TrimSpace(a.message.ReasoningContent().Thinking) == "" {
 		return a.thinkingViewMode != thinkingCollapsed
 	}
@@ -794,6 +884,10 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 // HandleKeyEvent implements KeyEventHandler.
 func (a *AssistantMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 	if k := key.String(); k == "c" || k == "y" {
+		a.EnsureBody()
+		if a.message == nil {
+			return false, nil
+		}
 		text := a.message.Content().Text
 		return true, common.CopyToClipboard(text, "Message copied to clipboard")
 	}

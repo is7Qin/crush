@@ -209,6 +209,23 @@ func (w *ClientWorkspace) ListMessages(ctx context.Context, sessionID string) ([
 	return protoToMessages(msgs), nil
 }
 
+// GetMessage implements [Workspace.GetMessage]. There is no
+// single-message endpoint, so this filters one session listing. It is
+// only used for scroll-back reloads of released bodies, which are rare
+// outside long histories.
+func (w *ClientWorkspace) GetMessage(ctx context.Context, sessionID, id string) (message.Message, error) {
+	msgs, err := w.ListMessages(ctx, sessionID)
+	if err != nil {
+		return message.Message{}, err
+	}
+	for _, msg := range msgs {
+		if msg.ID == id {
+			return msg, nil
+		}
+	}
+	return message.Message{}, fmt.Errorf("message not found: %s", id)
+}
+
 func (w *ClientWorkspace) ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error) {
 	msgs, err := w.client.ListUserMessages(ctx, w.workspaceID(), sessionID)
 	if err != nil {

@@ -1590,26 +1590,62 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 		msgPtrs[i] = &msgs[i]
 	}
 	toolResultMap := chat.BuildToolResultMap(msgPtrs)
+	// toolMsgSource lets each tool item reload its result without
+	// retaining it: it maps a tool call ID to the tool message that
+	// carries the result.
+	toolMsgSource := make(map[string]string)
+	for _, msg := range msgPtrs {
+		if msg.Role != message.Tool {
+			continue
+		}
+		for _, result := range msg.ToolResults() {
+			if result.ToolCallID != "" {
+				toolMsgSource[result.ToolCallID] = msg.ID
+			}
+		}
+	}
 	if len(msgPtrs) > 0 {
 		m.lastUserMessageTime = msgPtrs[0].CreatedAt
 	}
 
+	sessionID := ""
+	if m.session != nil {
+		sessionID = m.session.ID
+	}
+
 	// Add messages to chat with linked tool results
 	items := make([]chat.MessageItem, 0, len(msgs)*2)
+	attach := func(msg *message.Message, item chat.MessageItem) {
+		m.attachBodyLoader(sessionID, msg, toolMsgSource, item)
+		items = append(items, item)
+	}
 	for _, msg := range msgPtrs {
-		switch msg.Role {
+		// Items take ownership of a private copy. The service-owned
+		// slice shares one backing array, so a single resident item
+		// would otherwise pin every message's parts through it;
+		// clearing the source lets released bodies actually free.
+		msgCopy := *msg
+		msgRef := &msgCopy
+		switch msgRef.Role {
 		case message.User:
-			m.lastUserMessageTime = msg.CreatedAt
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
+			m.lastUserMessageTime = msgRef.CreatedAt
+			for _, item := range chat.ExtractMessageItems(m.com.Styles, msgRef, toolResultMap, m.com.Workspace.WorkingDir()) {
+				attach(msgRef, item)
+			}
 		case message.Assistant:
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
-			if chat.ShouldShowAssistantInfo(msg) {
-				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
+			for _, item := range chat.ExtractMessageItems(m.com.Styles, msgRef, toolResultMap, m.com.Workspace.WorkingDir()) {
+				attach(msgRef, item)
+			}
+			if chat.ShouldShowAssistantInfo(msgRef) {
+				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msgRef, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
 				items = append(items, infoItem)
 			}
 		default:
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
+			for _, item := range chat.ExtractMessageItems(m.com.Styles, msgRef, toolResultMap, m.com.Workspace.WorkingDir()) {
+				attach(msgRef, item)
+			}
 		}
+		msg.Parts = nil
 	}
 
 	// Load nested tool calls for agent/agentic_fetch tools.
@@ -1630,6 +1666,54 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	}
 	m.chat.SelectLast()
 	return tea.Sequence(cmds...)
+}
+
+// fetchBodyLoader returns a chat.BodyLoader that reloads the given
+// messages by ID. It runs synchronously against the store: local
+// reads are sub-millisecond SQLite lookups, so scroll-back renders
+// the right content with no placeholder flash.
+func (m *UI) fetchBodyLoader(sessionID string, msgIDs ...string) chat.BodyLoader {
+	return func() ([]message.Message, bool) {
+		msgs := make([]message.Message, 0, len(msgIDs))
+		for _, id := range msgIDs {
+			msg, err := m.com.Workspace.GetMessage(context.Background(), sessionID, id)
+			if err != nil {
+				return nil, false
+			}
+			msgs = append(msgs, msg)
+		}
+		return msgs, true
+	}
+}
+
+// attachBodyLoader wires a reload closure onto a newly built item so
+// its decoded body can be released far from the viewport.
+// toolMsgSource maps a tool call ID to the tool message carrying its
+// result; it is nil on live paths where the result has not arrived
+// yet (the loader is completed when it does).
+func (m *UI) attachBodyLoader(sessionID string, msg *message.Message, toolMsgSource map[string]string, item chat.MessageItem) {
+	if sessionID == "" || m.com == nil || m.com.Workspace == nil {
+		return
+	}
+	switch item := item.(type) {
+	case *chat.AssistantMessageItem:
+		item.SetBodyLoader(m.fetchBodyLoader(sessionID, msg.ID))
+	case *chat.UserMessageItem:
+		item.SetBodyLoader(m.fetchBodyLoader(sessionID, msg.ID))
+	case *chat.ShellItem:
+		item.SetBodyLoader(m.fetchBodyLoader(sessionID, msg.ID))
+	case chat.ToolMessageItem:
+		ids := []string{msg.ID}
+		if toolMsgID, ok := toolMsgSource[item.ToolCall().ID]; ok {
+			ids = append(ids, toolMsgID)
+			if setter, ok := item.(interface{ SetToolSource(string) }); ok {
+				setter.SetToolSource(toolMsgID)
+			}
+		}
+		if releasable, ok := item.(chat.Releasable); ok {
+			releasable.SetBodyLoader(m.fetchBodyLoader(sessionID, ids...))
+		}
+	}
 }
 
 // handleConnectionEvent reports the health of the client-server link and,
@@ -1697,6 +1781,17 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
 			nestedMsgPtrs[i] = &nestedMsgs[i]
 		}
 		nestedToolResultMap := chat.BuildToolResultMap(nestedMsgPtrs)
+		nestedToolMsgSource := make(map[string]string)
+		for _, nestedMsg := range nestedMsgPtrs {
+			if nestedMsg.Role != message.Tool {
+				continue
+			}
+			for _, result := range nestedMsg.ToolResults() {
+				if result.ToolCallID != "" {
+					nestedToolMsgSource[result.ToolCallID] = nestedMsg.ID
+				}
+			}
+		}
 
 		// Extract nested tool items.
 		var nestedTools []chat.ToolMessageItem
@@ -1708,6 +1803,7 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
 					if simplifiable, ok := nestedToolItem.(chat.Compactable); ok {
 						simplifiable.SetCompact(true)
 					}
+					m.attachBodyLoader(agentSessionID, nestedMsg, nestedToolMsgSource, nestedToolItem)
 					nestedTools = append(nestedTools, nestedToolItem)
 				}
 			}
@@ -1752,10 +1848,16 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		}
 		m.lastUserMessageTime = msg.CreatedAt
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
+		for _, item := range items {
+			m.attachBodyLoader(m.currentSessionID(), &msg, nil, item)
+		}
 		m.chat.AppendMessages(items...)
 		m.chat.ScrollToBottom()
 	case message.Assistant:
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
+		for _, item := range items {
+			m.attachBodyLoader(m.currentSessionID(), &msg, nil, item)
+		}
 		m.chat.AppendMessages(items...)
 		if m.chat.Follow() {
 			m.chat.ScrollToBottom()
@@ -1776,6 +1878,11 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			}
 			if toolMsgItem, ok := toolItem.(chat.ToolMessageItem); ok {
 				toolMsgItem.SetResult(&tr)
+				// Anchor the result source so the body can be
+				// released and reloaded later.
+				if setter, ok := toolItem.(interface{ SetToolSource(string) }); ok {
+					setter.SetToolSource(msg.ID)
+				}
 				if m.chat.Follow() {
 					m.chat.ScrollToBottom()
 				}
@@ -1861,7 +1968,9 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		if existingToolItem == nil {
-			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false, m.com.Workspace.WorkingDir()))
+			newItem := chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false, m.com.Workspace.WorkingDir())
+			m.attachBodyLoader(m.currentSessionID(), &msg, nil, newItem)
+			items = append(items, newItem)
 		}
 	}
 
@@ -1935,6 +2044,8 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 			if simplifiable, ok := nestedItem.(chat.Compactable); ok {
 				simplifiable.SetCompact(true)
 			}
+			payload := event.Payload
+			m.attachBodyLoader(childSessionID, &payload, nil, nestedItem)
 			nestedTools = append(nestedTools, nestedItem)
 		}
 	}
@@ -1944,6 +2055,9 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 		for _, nestedTool := range nestedTools {
 			if nestedTool.ToolCall().ID == tr.ToolCallID {
 				nestedTool.SetResult(&tr)
+				if setter, ok := nestedTool.(interface{ SetToolSource(string) }); ok {
+					setter.SetToolSource(event.Payload.ID)
+				}
 				break
 			}
 		}
